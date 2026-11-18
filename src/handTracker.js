@@ -1,8 +1,16 @@
 /**
- * Restart-safe MediaPipe Hands tracker.
+ * Restart-safe MediaPipe Hands tracker with two-hand zoom support.
  * Owns its webcam stream and animation loop. A new MediaPipe instance is
  * created for every camera session so stopping/restarting cannot reuse stale
  * Camera/Hands state.
+ *
+ * Two-hand behaviour:
+ *  - While two hands are visible, openness/rotation targets are FROZEN, so
+ *    the model keeps its current dismantled/assembled state while zooming.
+ *  - The distance between the palms is reported in `twoHand.distance`.
+ *  - If one hand drops out for a moment (very common), the zoom gesture and
+ *    the frozen state are held for `twoHandHoldMs` so the model never
+ *    collapses by accident.
  */
 
 const HAND_CONNECTIONS = [
@@ -16,6 +24,7 @@ const HAND_CONNECTIONS = [
 
 const FINGERTIP_INDICES = [4, 8, 12, 16, 20];
 const MCP_INDICES = [2, 5, 9, 13, 17];
+const PALM_INDICES = [0, 5, 9, 13, 17];
 
 export class HandTracker {
   constructor(videoElement, canvasElement, options = {}) {
@@ -54,9 +63,26 @@ export class HandTracker {
     this.smoothLateralX = 0;
     this.pulse = 0;
 
+    // Two-hand zoom
+    this.twoHandHoldMs = options.twoHandHoldMs ?? 500;
+    this.zoomSmoothing = options.zoomSmoothing ?? 0.35; // EMA factor per detection frame
+    this.lastTwoHandAt = -Infinity;
+    this.zoomDistance = null;
+    this.lastFingersOpen = 0;
+    this.lastPalmScale = '--';
+
     this.video.muted = true;
     this.video.playsInline = true;
     this.video.autoplay = true;
+  }
+
+  /** True while a two-hand zoom gesture is active (including the short dropout hold). */
+  get isTwoHands() {
+    return (
+      this.isRunning &&
+      this.zoomDistance !== null &&
+      performance.now() - this.lastTwoHandAt < this.twoHandHoldMs
+    );
   }
 
   async start() {
@@ -134,7 +160,7 @@ export class HandTracker {
       this.hands = handsInstance;
 
       await handsInstance.setOptions({
-        maxNumHands: 1,
+        maxNumHands: 2, // two hands are required for the zoom gesture
         modelComplexity: 1,
         minDetectionConfidence: 0.62,
         minTrackingConfidence: 0.58
@@ -301,6 +327,10 @@ export class HandTracker {
     this.targetLateralX = 0;
     this.smoothLateralX = 0;
     this.pulse = 0;
+    this.lastTwoHandAt = -Infinity;
+    this.zoomDistance = null;
+    this.lastFingersOpen = 0;
+    this.lastPalmScale = '--';
   }
 
   reportStatus(status, error = null) {
@@ -311,12 +341,14 @@ export class HandTracker {
     if (this.onUpdate) {
       this.onUpdate({
         isDetected: false,
+        handsCount: 0,
         rawOpenness: 0,
         fingersCount: 0,
         palmScale: '--',
         gestureText: 'NO HAND',
         fps: 0,
-        landmarks: null
+        landmarks: null,
+        twoHand: { active: false, distance: null }
       });
     }
   }
@@ -333,6 +365,25 @@ export class HandTracker {
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
+  palmCenter(landmarks) {
+    let x = 0;
+    let y = 0;
+    PALM_INDICES.forEach(index => {
+      x += landmarks[index].x;
+      y += landmarks[index].y;
+    });
+    return { x: x / PALM_INDICES.length, y: y / PALM_INDICES.length };
+  }
+
+  heldRotationPayload() {
+    return {
+      roll: this.targetRoll,
+      yaw: this.targetYaw,
+      rollDeg: Math.round(this.targetRoll * 180 / Math.PI),
+      yawDeg: Math.round(this.targetYaw * 180 / Math.PI)
+    };
+  }
+
   processResults(results) {
     if (!this.isRunning) return;
 
@@ -347,18 +398,41 @@ export class HandTracker {
     const width = this.canvas.width;
     const height = this.canvas.height;
     this.ctx.clearRect(0, 0, width, height);
+    this.pulse = (this.pulse + 0.08) % (Math.PI * 2);
 
-    const landmarks = results.multiHandLandmarks?.[0];
+    const hands = results.multiHandLandmarks || [];
+
+    // ---------------------------------------------------------------- 2 hands
+    if (hands.length >= 2) {
+      this.processTwoHands(hands, width, height, now);
+      return;
+    }
+
+    // One hand may briefly vanish in the middle of a zoom; keep the gesture.
+    const inZoomHold = now - this.lastTwoHandAt < this.twoHandHoldMs;
+    const landmarks = hands[0];
+
+    // ----------------------------------------------------------------- 1 hand
     if (landmarks) {
-      this.isHandPresent = true;
       const { openness, fingersOpen, palmScale } = this.calculateOpenness(landmarks);
       const rotation = this.calculateHandRotation(landmarks);
 
+      this.isHandPresent = true;
+      this.drawHandSkeleton(landmarks, width, height, openness, rotation);
+
+      if (inZoomHold) {
+        // Do NOT touch targetOpenness: the model must keep its current state.
+        this.emitZoomHold(landmarks);
+        return;
+      }
+
+      this.zoomDistance = null;
       this.targetOpenness = openness;
       this.targetRoll = rotation.roll;
       this.targetYaw = rotation.yaw;
       this.targetLateralX = rotation.lateralX;
-      this.drawHandSkeleton(landmarks, width, height, openness, rotation);
+      this.lastFingersOpen = fingersOpen;
+      this.lastPalmScale = palmScale.toFixed(2);
 
       let gesture = 'PARTIAL';
       if (openness > 0.65) gesture = 'OPEN HAND';
@@ -366,9 +440,10 @@ export class HandTracker {
 
       this.onUpdate?.({
         isDetected: true,
+        handsCount: 1,
         rawOpenness: openness,
         fingersCount: fingersOpen,
-        palmScale: palmScale.toFixed(2),
+        palmScale: this.lastPalmScale,
         gestureText: gesture,
         fps: this.fps,
         landmarks,
@@ -377,21 +452,85 @@ export class HandTracker {
           yaw: rotation.yaw,
           rollDeg: Math.round(rotation.roll * 180 / Math.PI),
           yawDeg: Math.round(rotation.yaw * 180 / Math.PI)
-        }
+        },
+        twoHand: { active: false, distance: null }
       });
-    } else {
-      this.isHandPresent = false;
-      this.targetOpenness = 0;
-      this.onUpdate?.({
-        isDetected: false,
-        rawOpenness: this.smoothOpenness,
-        fingersCount: 0,
-        palmScale: '--',
-        gestureText: 'NO HAND',
-        fps: this.fps,
-        landmarks: null
-      });
+      return;
     }
+
+    // ---------------------------------------------------------------- no hand
+    if (inZoomHold) {
+      this.emitZoomHold(null);
+      return;
+    }
+
+    this.isHandPresent = false;
+    this.targetOpenness = 0;
+    this.zoomDistance = null;
+    this.onUpdate?.({
+      isDetected: false,
+      handsCount: 0,
+      rawOpenness: this.smoothOpenness,
+      fingersCount: 0,
+      palmScale: '--',
+      gestureText: 'NO HAND',
+      fps: this.fps,
+      landmarks: null,
+      twoHand: { active: false, distance: null }
+    });
+  }
+
+  processTwoHands(hands, width, height, now) {
+    this.lastTwoHandAt = now;
+    this.isHandPresent = true;
+
+    // Distance between the palms in "image-height" units, so horizontal and
+    // vertical movement count equally on a 4:3 / 16:9 camera.
+    const a = this.palmCenter(hands[0]);
+    const b = this.palmCenter(hands[1]);
+    const aspect = width / height;
+    const rawDistance = Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+
+    this.zoomDistance = this.zoomDistance === null
+      ? rawDistance
+      : this.zoomDistance + (rawDistance - this.zoomDistance) * this.zoomSmoothing;
+
+    for (let i = 0; i < 2; i++) {
+      const { openness } = this.calculateOpenness(hands[i]);
+      this.drawHandSkeleton(hands[i], width, height, openness, this.calculateHandRotation(hands[i]));
+    }
+    this.drawZoomLink(a, b, width, height);
+
+    // targetOpenness / targetRoll / targetYaw are intentionally left alone.
+    this.onUpdate?.({
+      isDetected: true,
+      handsCount: 2,
+      rawOpenness: this.targetOpenness,
+      fingersCount: this.lastFingersOpen,
+      palmScale: this.lastPalmScale,
+      gestureText: 'TWO-HAND ZOOM',
+      fps: this.fps,
+      landmarks: hands[0],
+      allLandmarks: hands,
+      rotation: this.heldRotationPayload(),
+      twoHand: { active: true, distance: this.zoomDistance }
+    });
+  }
+
+  emitZoomHold(landmarks) {
+    this.onUpdate?.({
+      isDetected: !!landmarks,
+      handsCount: landmarks ? 1 : 0,
+      rawOpenness: this.targetOpenness,
+      fingersCount: this.lastFingersOpen,
+      palmScale: this.lastPalmScale,
+      gestureText: 'TWO-HAND ZOOM',
+      fps: this.fps,
+      landmarks: landmarks || null,
+      rotation: this.heldRotationPayload(),
+      // Keep the gesture alive with the last known distance.
+      twoHand: { active: this.zoomDistance !== null, distance: this.zoomDistance }
+    });
   }
 
   calculateOpenness(landmarks) {
@@ -433,9 +572,40 @@ export class HandTracker {
     return { roll, yaw, lateralX };
   }
 
+  drawZoomLink(a, b, width, height) {
+    const ctx = this.ctx;
+    const ax = a.x * width;
+    const ay = a.y * height;
+    const bx = b.x * width;
+    const by = b.y * height;
+    const mx = (ax + bx) / 2;
+    const my = (ay + by) / 2;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = 'rgba(85, 232, 255, 0.8)';
+    ctx.strokeStyle = 'rgba(85, 232, 255, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(mx, my, 5 + Math.sin(this.pulse) * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ff6cb7';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   drawHandSkeleton(landmarks, width, height, openness, rotation = { roll: 0, yaw: 0 }) {
     const ctx = this.ctx;
-    this.pulse = (this.pulse + 0.08) % (Math.PI * 2);
 
     const red = Math.round(openness * 255);
     const green = Math.round((1 - openness * 0.5) * 240);

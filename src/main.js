@@ -303,22 +303,30 @@ function highlightPartInList(part) {
 }
 
 function handleHandTrackingUpdate(data) {
+  // ---- Two-hand zoom -------------------------------------------------
+  // Drives the camera only. It never touches the dismantle factor, so the
+  // model stays exactly as it is (assembled, partly or fully separated).
+  const twoHand = data.twoHand;
+  if (twoHand?.active) sceneMgr?.updateTwoHandZoom(twoHand.distance);
+  else sceneMgr?.endTwoHandZoom();
+
   statFps.textContent = String(data.fps || 0);
-  if (data.isDetected) {
-    if (data.isTwoHands) {
-      gestureBadge.textContent = "TWO-HAND ZOOM";
-      gestureBadge.className = "gesture-badge two-hands";
-      statFingers.textContent = "2 HANDS";
-      statDist.textContent = data.zoomState || "ZOOM READY";
-    } else {
-      const gesture = data.gestureText || "TRACKING";
-      gestureBadge.textContent = gesture;
-      gestureBadge.className = "gesture-badge";
-      if (gesture === "OPEN HAND") gestureBadge.classList.add("open");
-      if (gesture === "CLOSED FIST") gestureBadge.classList.add("fist");
-      statFingers.textContent = `${data.fingersCount}/5`;
-      statDist.textContent = data.rotation ? `${data.rotation.rollDeg}°` : "—";
-    }
+
+  if (twoHand?.active) {
+    gestureBadge.textContent = "TWO-HAND ZOOM";
+    gestureBadge.className = "gesture-badge two-hands";
+    statFingers.textContent = "2 HANDS";
+    statDist.textContent = Number.isFinite(twoHand.distance)
+      ? `ZOOM ${twoHand.distance.toFixed(2)}`
+      : "ZOOM";
+  } else if (data.isDetected) {
+    const gesture = data.gestureText || "TRACKING";
+    gestureBadge.textContent = gesture;
+    gestureBadge.className = "gesture-badge";
+    if (gesture === "OPEN HAND") gestureBadge.classList.add("open");
+    if (gesture === "CLOSED FIST") gestureBadge.classList.add("fist");
+    statFingers.textContent = `${data.fingersCount}/5`;
+    statDist.textContent = data.rotation ? `${data.rotation.rollDeg}°` : "—";
   } else {
     gestureBadge.textContent = "NO HAND";
     gestureBadge.className = "gesture-badge";
@@ -338,10 +346,7 @@ function updateOpennessDisplay(factor) {
     sliderVal.textContent = `${percentage}%`;
   }
 
-  if (handTracker?.isRunning && handTracker?.isTwoHands) {
-    dismantleStateVal.textContent = "LOCKED · TWO-HAND ZOOM";
-    dismantleStateVal.className = "tel-val state-assembled";
-  } else if (percentage <= 5) {
+  if (percentage <= 5) {
     dismantleStateVal.textContent = "ASSEMBLED";
     dismantleStateVal.className = "tel-val state-assembled";
   } else if (percentage >= 95) {
@@ -350,6 +355,11 @@ function updateOpennessDisplay(factor) {
   } else {
     dismantleStateVal.textContent = `SEPARATING · ${percentage}%`;
     dismantleStateVal.className = "tel-val state-moving";
+  }
+
+  // The separation state is held while zooming; just flag that zoom is on.
+  if (handTracker?.isTwoHands) {
+    dismantleStateVal.textContent += " · ZOOM";
   }
 }
 
@@ -423,6 +433,7 @@ async function toggleCameraAction() {
   try {
     if (handTracker.isRunning) {
       await handTracker.stop();
+      sceneMgr.endTwoHandZoom();
       manualOverrideActive = false;
       clearTimeout(manualOverrideTimer);
       currentFactor = 0;
@@ -607,19 +618,18 @@ function animate(now) {
 
   let handRotation = null;
   if (!manualOverrideActive && handTracker?.isRunning) {
-    if (handTracker.isTwoHands) {
-      // Two hands detected: disable separation and allow zooming with both hands
-      currentFactor = 0;
-      sceneMgr.applyTwoHandZoom(handTracker.twoHandZoomDelta, dt);
-      handRotation = null;
-    } else {
-      // Openness returns smoothly to zero when the hand leaves the frame.
-      currentFactor = handTracker.getSmoothOpenness(dt);
-      if (handTracker.isHandPresent)
-        handRotation = handTracker.getSmoothRotation(dt);
+    // FIX: the old code forced currentFactor = 0 whenever two hands were
+    // visible, which collapsed the model back to assembled during zoom.
+    // The tracker now freezes its openness while two hands are visible, so
+    // the model simply stays in whatever state it was in. It still returns
+    // smoothly to zero when the hands leave the frame.
+    currentFactor = handTracker.getSmoothOpenness(dt);
+    if (handTracker.isHandPresent) {
+      handRotation = handTracker.getSmoothRotation(dt);
     }
   }
 
+  // The scene freezes the model's rotation by itself while zoom is active.
   sceneMgr.applyHandRotation(
     handRotation,
     currentFactor,
@@ -634,8 +644,8 @@ function animate(now) {
     sound.playExplodeCompleteSound();
   lastFactorAudioCheck = currentFactor;
 
-  sceneMgr.updateDismantle(currentFactor, handRotation);
-  // sceneMgr.updateExplosionParticles(currentFactor, dt);
+  // Particles are now updated inside updateDismantle (dt is needed for them).
+  sceneMgr.updateDismantle(currentFactor, handRotation, dt);
   updateOpennessDisplay(currentFactor);
   labelMgr.update(currentFactor, sceneMgr.width, sceneMgr.height);
   sceneMgr.render(dt);

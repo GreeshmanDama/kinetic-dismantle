@@ -1,16 +1,22 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
+const MIN_HAND_DISTANCE = 0.04;
+const ZERO_VECTOR = new THREE.Vector3();
+const UP_VECTOR = new THREE.Vector3(0, 1, 0);
+
 export class SceneManager {
   constructor(container) {
     this.container = container;
     this.width = container.clientWidth || window.innerWidth;
     this.height = container.clientHeight || window.innerHeight;
+
+    // Explosion particles
+    this.particlesEnabled = true;
     this.explosionParticles = null;
-    this.particlePositions = null;
+    this.particleBase = null; // immutable rest positions (never written to after creation)
     this.particleVelocities = null;
     this.particleCount = 90;
-    this.particleProgress = 0;
 
     this.scene = new THREE.Scene();
     // Transparent clear lets the carefully tuned CSS studio gradient show through.
@@ -48,6 +54,7 @@ export class SceneManager {
     this.modelElevationY = 0;
     this.modelTarget = new THREE.Vector3(0, this.modelElevationY, 0);
     this.modelRadius = 2.2;
+    this.explodedRadius = 2.2;
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -85,52 +92,69 @@ export class SceneManager {
     this.currentParts = [];
     this.spreadMultiplier = 1;
     this.baseSpreadScale = 0.62;
-    this.twoHandZoomVelocity = 0;
     this.autoRotate = true;
     this.isHandControllingRotation = false;
     this.isTransitioningCamera = false;
     this.targetCamPos = new THREE.Vector3();
     this.targetControlsTarget = new THREE.Vector3();
 
+    // ---- Two-hand zoom state -------------------------------------------
+    // Zoom is "absolute": the camera distance follows the ratio between the
+    // hand separation when the gesture started and the current separation.
+    // It works the same whether the model is assembled or dismantled.
+    this.zoomActive = false;
+    this.zoomSensitivity = 1.5; // >1 = a small hand movement zooms more
+    this.zoomSmoothing = 9; // higher = snappier, lower = silkier
+    this.zoomStartHandDistance = 0;
+    this.zoomStartCamDistance = 0;
+    this.zoomTargetDistance = null;
+
+    // Reusable temporaries (no per-frame allocations)
+    this._offsetVec = new THREE.Vector3();
+    this._pivotA = new THREE.Vector3();
+    this._pivotB = new THREE.Vector3();
+    this._euler = new THREE.Euler();
+
     this.resizeObserver = new ResizeObserver(() => this.onWindowResize());
     this.resizeObserver.observe(container);
     window.addEventListener("resize", this.onWindowResize);
   }
 
+  // ======================================================================
+  // PARTICLES
+  // ======================================================================
+
   createExplosionParticles() {
     this.disposeExplosionParticles();
 
     const count = this.particleCount;
-
     const geometry = new THREE.BufferGeometry();
-
     const positions = new Float32Array(count * 3);
-
     const velocities = new Float32Array(count * 3);
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-
       const angle = Math.random() * Math.PI * 2;
-
       const radius = 0.4 + Math.random() * 2.2;
-
       const height = (Math.random() - 0.5) * 2.2;
 
       positions[i3] = Math.cos(angle) * radius;
-
       positions[i3 + 1] = height;
-
       positions[i3 + 2] = Math.sin(angle) * radius;
 
       velocities[i3] = Math.cos(angle) * (0.25 + Math.random() * 0.5);
-
       velocities[i3 + 1] = (Math.random() - 0.5) * 0.45;
-
       velocities[i3 + 2] = Math.sin(angle) * (0.25 + Math.random() * 0.5);
     }
 
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    // FIX: the GPU attribute gets its OWN copy of the array. Previously the
+    // attribute array and the "base" array were the same Float32Array, so each
+    // frame the base positions were overwritten and then re-scaled again,
+    // compounding exponentially.
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(positions.slice(), 3),
+    );
 
     const material = new THREE.PointsMaterial({
       color: 0x65dfff,
@@ -143,54 +167,44 @@ export class SceneManager {
     });
 
     this.explosionParticles = new THREE.Points(geometry, material);
-
     this.explosionParticles.visible = false;
-
+    // Positions change every frame, so the initial bounding sphere is stale.
+    this.explosionParticles.frustumCulled = false;
+    // Centre the cloud on the model and scale it with the model's size.
+    this.explosionParticles.position.copy(this.modelTarget);
+    this.explosionParticles.scale.setScalar(Math.max(this.modelRadius / 2.2, 0.5));
     this.scene.add(this.explosionParticles);
 
-    this.particlePositions = positions;
-
+    this.particleBase = positions;
     this.particleVelocities = velocities;
   }
 
   updateExplosionParticles(factor, dt = 0.016) {
-    if (!this.explosionParticles) {
-      return;
-    }
+    if (!this.explosionParticles || !this.particleBase) return;
 
     const value = THREE.MathUtils.clamp(factor, 0, 1);
 
-    const positions =
-      this.explosionParticles.geometry.attributes.position.array;
-
-    const velocities = this.particleVelocities;
-
-    for (let i = 0; i < this.particleCount; i++) {
-      const i3 = i * 3;
-
-      const baseX = this.particlePositions[i3];
-
-      const baseY = this.particlePositions[i3 + 1];
-
-      const baseZ = this.particlePositions[i3 + 2];
-
-      positions[i3] = baseX * (0.25 + value * 1.8);
-
-      positions[i3 + 1] = baseY * (0.25 + value * 1.8);
-
-      positions[i3 + 2] = baseZ * (0.25 + value * 1.8);
-
-      positions[i3] += velocities[i3] * value;
-
-      positions[i3 + 1] += velocities[i3 + 1] * value;
-
-      positions[i3 + 2] += velocities[i3 + 2] * value;
+    if (value <= 0.02) {
+      this.explosionParticles.visible = false;
+      return;
     }
 
-    positions.needsUpdate = true;
+    const attribute = this.explosionParticles.geometry.attributes.position;
+    const positions = attribute.array;
+    const base = this.particleBase;
+    const velocities = this.particleVelocities;
+    const radial = 0.25 + value * 1.8;
 
-    this.explosionParticles.visible = value > 0.08;
+    for (let i = 0; i < positions.length; i++) {
+      positions[i] = base[i] * radial + velocities[i] * value;
+    }
 
+    // FIX: needsUpdate must be set on the BufferAttribute, not on the raw
+    // typed array (that flag was silently ignored, so nothing re-uploaded).
+    attribute.needsUpdate = true;
+
+    this.explosionParticles.visible = true;
+    this.explosionParticles.rotation.y += dt * 0.15 * value;
     this.explosionParticles.material.opacity = THREE.MathUtils.clamp(
       value * 1.5,
       0,
@@ -199,20 +213,19 @@ export class SceneManager {
   }
 
   disposeExplosionParticles() {
-    if (!this.explosionParticles) {
-      return;
-    }
+    if (!this.explosionParticles) return;
 
     this.scene.remove(this.explosionParticles);
-
     this.explosionParticles.geometry.dispose();
-
     this.explosionParticles.material.dispose();
-
     this.explosionParticles = null;
-    this.particlePositions = null;
+    this.particleBase = null;
     this.particleVelocities = null;
   }
+
+  // ======================================================================
+  // SCENE SETUP
+  // ======================================================================
 
   setupLighting() {
     const hemisphere = new THREE.HemisphereLight(0xc6e7ff, 0x1b2636, 1.8);
@@ -280,14 +293,16 @@ export class SceneManager {
       this.disposeObject(previousRoot);
     }
 
+    // A new model must never inherit a half-finished zoom gesture.
+    this.endTwoHandZoom();
+    this.zoomTargetDistance = null;
+
     this.currentModelRoot = modelData.root;
     this.currentParts = modelData.parts || [];
     this.currentModelRoot.position.set(0, 0, 0);
     this.currentModelRoot.rotation.set(0, 0, 0);
     this.scene.add(this.currentModelRoot);
 
-    // Custom GLB import already computed normalized bounds. Reuse them instead
-    // of walking every vertex-bearing node a second time.
     const bounds = modelData.bounds
       ? modelData.bounds.clone()
       : new THREE.Box3().setFromObject(this.currentModelRoot);
@@ -300,9 +315,22 @@ export class SceneManager {
       this.modelRadius = 2.2;
     }
 
+    // How far the farthest part travels when fully dismantled. Used so the
+    // zoom limits always allow the whole exploded model to fit on screen.
+    let maxOffset = 0;
+    this.currentParts.forEach((part) => {
+      if (part.explodeOffset) {
+        maxOffset = Math.max(maxOffset, part.explodeOffset.length());
+      }
+    });
+    this.explodedRadius =
+      this.modelRadius +
+      maxOffset * this.baseSpreadScale * this.spreadMultiplier;
+
     this.controls.target.copy(this.modelTarget);
     this.fitCameraToModel();
-    // this.createExplosionParticles();
+
+    if (this.particlesEnabled) this.createExplosionParticles();
   }
 
   fitCameraToModel() {
@@ -318,13 +346,32 @@ export class SceneManager {
     this.camera.near = Math.max(0.03, distance / 220);
     this.camera.far = Math.max(120, distance * 14);
     this.camera.updateProjectionMatrix();
+
+    // Zoom limits scale with the model so dismantled models can be zoomed out
+    // far enough to see every part, and zoomed in without clipping inside.
+    this.controls.minDistance = Math.max(1.2, this.modelRadius * 0.4);
+    this.controls.maxDistance = Math.max(
+      35,
+      distance * 4,
+      this.explodedRadius * 10,
+    );
+
     this.controls.target.copy(this.modelTarget);
     this.controls.update();
     this.isTransitioningCamera = false;
   }
 
+  // ======================================================================
+  // HAND ROTATION
+  // ======================================================================
+
   applyHandRotation(rotation, opennessFactor, isHandPresent, dt = 0.016) {
     if (!this.currentModelRoot) return;
+
+    // While zooming with two hands the model's orientation is frozen so the
+    // zoom gesture never twists the model.
+    if (this.zoomActive) return;
+
     if (isHandPresent && rotation) {
       this.isHandControllingRotation = true;
       const targetY = rotation.roll * 1.65 + rotation.yaw * 1.25;
@@ -376,117 +423,173 @@ export class SceneManager {
     }
   }
 
-  applyTwoHandZoom(zoomDelta, dt = 0.016) {
-    if (Math.abs(zoomDelta) > 0.00012) {
-      this.twoHandZoomVelocity += zoomDelta * 4.8;
-    }
-    if (Math.abs(this.twoHandZoomVelocity) > 0.0001) {
-      const offset = this.camera.position.clone().sub(this.controls.target);
-      const currentDist = offset.length();
-      // zoomDelta > 0 means hands spread apart -> zoom in (factor < 1, camera distance decreases)
-      // zoomDelta < 0 means hands brought together -> zoom out (factor > 1, camera distance increases)
-      const factor = 1 - this.twoHandZoomVelocity * dt * 7.2;
-      const newDist = THREE.MathUtils.clamp(
-        currentDist * factor,
-        this.controls.minDistance,
-        this.controls.maxDistance,
-      );
-      offset.setLength(newDist);
-      this.camera.position.copy(this.controls.target).add(offset);
-      this.controls.update();
-      this.twoHandZoomVelocity *= Math.exp(-8.5 * dt);
-    }
+  // ======================================================================
+  // TWO-HAND ZOOM
+  // ======================================================================
+
+  /**
+   * Call with the current distance between the two hands every time the
+   * tracker reports `twoHand.active`. The first call starts the gesture.
+   * It only moves the camera, never touches the dismantle state, so it works
+   * identically when the model is assembled or exploded.
+   */
+  updateTwoHandZoom(handDistance) {
+    if (!(handDistance > 0)) return;
+    if (!this.zoomActive) this.beginTwoHandZoom(handDistance);
+
+    const ratio =
+      this.zoomStartHandDistance / Math.max(handDistance, MIN_HAND_DISTANCE);
+    // Hands apart  -> ratio < 1 -> camera moves closer (zoom in)
+    // Hands closer -> ratio > 1 -> camera moves away  (zoom out)
+    const target =
+      this.zoomStartCamDistance * Math.pow(ratio, this.zoomSensitivity);
+
+    this.zoomTargetDistance = THREE.MathUtils.clamp(
+      target,
+      this.controls.minDistance,
+      this.controls.maxDistance,
+    );
   }
 
-  updateDismantle(factor, handRotation = null) {
-    if (!this.currentParts.length) return;
+  beginTwoHandZoom(handDistance) {
+    if (!(handDistance > 0)) return;
+    // A running camera preset transition would fight the zoom.
+    this.isTransitioningCamera = false;
+    this.zoomActive = true;
+    this.zoomStartHandDistance = Math.max(handDistance, MIN_HAND_DISTANCE);
+    this.zoomStartCamDistance = this.camera.position.distanceTo(
+      this.controls.target,
+    );
+    this.zoomTargetDistance = this.zoomStartCamDistance;
+  }
 
+  /** The camera keeps gliding to its last target after this, then stops. */
+  endTwoHandZoom() {
+    this.zoomActive = false;
+  }
+
+  _stepZoom(dt) {
+    if (this.zoomTargetDistance === null) return;
+
+    const offset = this._offsetVec
+      .copy(this.camera.position)
+      .sub(this.controls.target);
+    const current = offset.length();
+    if (current < 1e-4) {
+      this.zoomTargetDistance = null;
+      return;
+    }
+
+    // Interpolate in log-space so zooming in and out feel equally fast.
+    const alpha = 1 - Math.exp(-this.zoomSmoothing * dt);
+    let next = current * Math.pow(this.zoomTargetDistance / current, alpha);
+
+    const settled = Math.abs(next - this.zoomTargetDistance) < 0.004;
+    if (settled) next = this.zoomTargetDistance;
+
+    offset.setLength(next);
+    this.camera.position.copy(this.controls.target).add(offset);
+
+    if (settled && !this.zoomActive) this.zoomTargetDistance = null;
+  }
+
+  // ======================================================================
+  // DISMANTLE
+  // ======================================================================
+
+  /**
+   * @param {number} factor        0 = assembled, 1 = fully dismantled
+   * @param {object|null} handRotation  { roll, yaw } or null
+   * @param {number} dt            frame delta in seconds
+   */
+  updateDismantle(factor, handRotation = null, dt = 0.016) {
     const value = THREE.MathUtils.clamp(factor, 0, 1);
 
-    /*
-     * Smoother explosion curve.
-     */
-    const eased = value * value * (3 - 2 * value);
+    // FIX: a single smoothstep. Previously the value was smoothed twice
+    // (manual smoothstep + MathUtils.smoothstep) on top of the tracker's own
+    // smoothing, which made the start/end of the motion feel laggy.
+    const progress = value * value * (3 - 2 * value);
 
-    /*
-     * Additional smoothing near the beginning/end.
-     */
-    const explosionProgress = THREE.MathUtils.smoothstep(eased, 0, 1);
+    this.updateExplosionParticles(progress, dt);
 
-    const effectiveSpread =
-      this.spreadMultiplier * this.baseSpreadScale * explosionProgress;
+    if (!this.currentParts.length) return;
 
-    const rotSpread = this.spreadMultiplier * this.baseSpreadScale;
+    const spread = this.spreadMultiplier * this.baseSpreadScale;
+    const effectiveSpread = spread * progress;
+    const rotAmount = spread * progress;
+
+    // FIX: no hard `value > 0.12` switch (it caused a visible pop). The spin
+    // already scales with `progress`, so it fades in on its own.
+    const spinAngle = handRotation
+      ? (THREE.MathUtils.clamp(handRotation.roll, -1.2, 1.2) * 0.65 +
+          handRotation.yaw * 0.45) *
+        progress
+      : 0;
+
+    const pivotA = this._pivotA;
+    const pivotB = this._pivotB;
+    const euler = this._euler;
 
     this.currentParts.forEach((part, index) => {
-      part._offset ||= new THREE.Vector3();
+      // Lazily created, cached per part.
+      if (!part._baseQuat) {
+        part._baseQuat = new THREE.Quaternion().setFromEuler(part.originalRot);
+        part._offsetQuat = new THREE.Quaternion();
+        part._spinQuat = new THREE.Quaternion();
+        part._finalQuat = new THREE.Quaternion();
+        part._spinAxis = part.explodeOffset.clone();
+        if (part._spinAxis.lengthSq() < 0.001) {
+          part._spinAxis.copy(UP_VECTOR);
+        }
+        part._spinAxis.normalize();
+      }
 
-      part._baseQuaternion ||= new THREE.Quaternion();
-
-      part._explodedQuaternion ||= new THREE.Quaternion();
-
-      part._spinQuaternion ||= new THREE.Quaternion();
-
-      part._axis ||= new THREE.Vector3();
-
-      part._euler ||= new THREE.Euler();
-
-      // ========================================================
-      // POSITION
-      // ========================================================
-
-      part._offset.copy(part.explodeOffset).multiplyScalar(effectiveSpread);
-
-      part.object.position.copy(part.originalPos).add(part._offset);
-
-      // ========================================================
-      // ROTATION
-      // ========================================================
-
-      part._baseQuaternion.setFromEuler(part.originalRot);
+      // ---- Rotation (all rotations are in the model's parent space) ------
+      let finalQuat = part._finalQuat.copy(part._baseQuat);
 
       if (part.explodeRotOffset) {
-        part._euler.set(
-          part.originalRot.x + part.explodeRotOffset.x * rotSpread,
-
-          part.originalRot.y + part.explodeRotOffset.y * rotSpread,
-
-          part.originalRot.z + part.explodeRotOffset.z * rotSpread,
+        euler.set(
+          part.explodeRotOffset.x * rotAmount,
+          part.explodeRotOffset.y * rotAmount,
+          part.explodeRotOffset.z * rotAmount,
         );
-
-        part._explodedQuaternion.setFromEuler(part._euler);
-
-        part._baseQuaternion.slerp(part._explodedQuaternion, explosionProgress);
+        part._offsetQuat.setFromEuler(euler);
+        finalQuat.premultiply(part._offsetQuat);
       }
 
-      // ========================================================
-      // HAND CONTROLLED SPIN
-      // ========================================================
-
-      if (handRotation && value > 0.12) {
-        part._axis.copy(part.explodeOffset);
-
-        if (part._axis.lengthSq() < 0.001) {
-          part._axis.set(0, 1, 0);
-        }
-
-        part._axis.normalize();
-
-        const spin =
-          (handRotation.roll * 0.65 + handRotation.yaw * 0.45) *
-          explosionProgress;
-
-        part._spinQuaternion.setFromAxisAngle(
-          part._axis,
-          spin * (index % 2 ? -1 : 1),
+      // FIX: the spin axis is expressed in parent space, so the spin must be
+      // PRE-multiplied. Post-multiplying rotated it around a local axis.
+      if (spinAngle !== 0) {
+        part._spinQuat.setFromAxisAngle(
+          part._spinAxis,
+          spinAngle * (index % 2 ? -1 : 1),
         );
-
-        part._baseQuaternion.multiply(part._spinQuaternion);
+        finalQuat.premultiply(part._spinQuat);
       }
 
-      part.object.quaternion.copy(part._baseQuaternion);
+      part.object.quaternion.copy(finalQuat);
+
+      // ---- Position -------------------------------------------------------
+      // FIX: rotate each part around its own centre instead of the group
+      // origin. The procedural models keep every group at (0,0,0) with the
+      // meshes offset inside it, so rotating the group used to swing the part
+      // around the model origin instead of spinning it in place.
+      part.object.position
+        .copy(part.originalPos)
+        .addScaledVector(part.explodeOffset, effectiveSpread);
+
+      const pivot = part.pivot || ZERO_VECTOR;
+      if (pivot !== ZERO_VECTOR) {
+        pivotA.copy(pivot).applyQuaternion(part._baseQuat);
+        pivotB.copy(pivot).applyQuaternion(finalQuat);
+        part.object.position.add(pivotA).sub(pivotB);
+      }
     });
   }
+
+  // ======================================================================
+  // CAMERA HELPERS
+  // ======================================================================
 
   setPresetView(viewName) {
     const radius = Math.max(this.modelRadius, 1.2);
@@ -501,6 +604,7 @@ export class SceneManager {
     };
     const direction = directions[viewName];
     if (!direction) return;
+    this.zoomTargetDistance = null;
     this.targetCamPos
       .copy(this.modelTarget)
       .addScaledVector(direction.normalize(), distance);
@@ -511,6 +615,7 @@ export class SceneManager {
   focusOnPart(part) {
     const worldPosition = new THREE.Vector3();
     part.object.getWorldPosition(worldPosition);
+    this.zoomTargetDistance = null;
     this.targetControlsTarget.copy(worldPosition);
     const direction = new THREE.Vector3(1.1, 0.72, 1.45).normalize();
     this.targetCamPos
@@ -529,7 +634,10 @@ export class SceneManager {
   };
 
   render(dt = 0.016) {
-    if (this.isTransitioningCamera) {
+    // A long frame (tab switch, GC pause) must not cause a camera jump.
+    dt = Math.min(dt, 0.1);
+
+    if (this.isTransitioningCamera && !this.zoomActive) {
       const alpha = 1 - Math.exp(-7.5 * dt);
       this.camera.position.lerp(this.targetCamPos, alpha);
       this.controls.target.lerp(this.targetControlsTarget, alpha);
@@ -540,11 +648,14 @@ export class SceneManager {
       }
     }
 
+    this._stepZoom(dt);
+
     if (
       this.autoRotate &&
       !this.isHandControllingRotation &&
       !this.isInteracting &&
       !this.isTransitioningCamera &&
+      !this.zoomActive &&
       this.currentModelRoot
     ) {
       this.currentModelRoot.rotation.y += 0.22 * dt;
@@ -559,8 +670,8 @@ export class SceneManager {
     window.removeEventListener("resize", this.onWindowResize);
     this.controls.dispose();
     if (this.currentModelRoot) this.disposeObject(this.currentModelRoot);
-    this.renderer.dispose();
     this.disposeExplosionParticles();
+    this.renderer.dispose();
     this.container.innerHTML = "";
   }
 }
