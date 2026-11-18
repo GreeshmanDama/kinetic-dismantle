@@ -10,16 +10,29 @@ export class SceneManager {
     this.container = container;
     this.width = container.clientWidth || window.innerWidth;
     this.height = container.clientHeight || window.innerHeight;
-
-    // Explosion particles
-    this.particlesEnabled = true;
     this.explosionParticles = null;
-    this.particleBase = null; // immutable rest positions (never written to after creation)
-    this.particleVelocities = null;
-    this.particleCount = 90;
+    this.pointer = null;
+    this.pointerSmooth = null;
+    this.pointerReach = 1.0;
+    this.overlay = null;
+    this.partRaycaster = new THREE.Raycaster();
+    this.partPointerNdc = new THREE.Vector2();
+    this.partGrabPlane = new THREE.Plane();
+    this.partGrabIntersection = new THREE.Vector3();
+    this.partGrabObjectWorld = new THREE.Vector3();
+    this.partGrabTargetWorld = new THREE.Vector3();
+    this.partGrabTargetLocal = new THREE.Vector3();
+    this.partCameraDirection = new THREE.Vector3();
+    this.partProjected = new THREE.Vector3();
+    this.partBounds = new THREE.Box3();
+    this.partGrabOffset = new THREE.Vector3();
+    this.partGrab = null;
+    this.partHover = null;
+    this.partWasPinching = false;
+    this.partGrabEnabled = true;
+    this.partHoverRadiusPx = 90;
 
     this.scene = new THREE.Scene();
-    // Transparent clear lets the carefully tuned CSS studio gradient show through.
     this.scene.background = null;
     this.scene.fog = null;
 
@@ -39,8 +52,6 @@ export class SceneManager {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setSize(this.width, this.height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-    // The viewport has no ground plane; disabling shadow maps saves GPU time
-    // on dense imported CAD, vehicle and scan models.
     this.renderer.shadowMap.enabled = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -68,11 +79,11 @@ export class SceneManager {
     this.controls.maxPolarAngle = Math.PI - 0.02;
     this.controls.target.copy(this.modelTarget);
     this.isInteracting = false;
-    this.mouseMode = "drag";
+    this.mouseMode = "orbit";
     this.controls.mouseButtons = {
-      LEFT: THREE.MOUSE.PAN,
+      LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.PAN,
     };
     this.controls.touches = {
       ONE: THREE.TOUCH.PAN,
@@ -87,7 +98,6 @@ export class SceneManager {
 
     this.setupLighting();
     this.setupEnvironment();
-
     this.currentModelRoot = null;
     this.currentParts = [];
     this.spreadMultiplier = 1;
@@ -97,135 +107,358 @@ export class SceneManager {
     this.isTransitioningCamera = false;
     this.targetCamPos = new THREE.Vector3();
     this.targetControlsTarget = new THREE.Vector3();
-
-    // ---- Two-hand zoom state -------------------------------------------
-    // Zoom is "absolute": the camera distance follows the ratio between the
-    // hand separation when the gesture started and the current separation.
-    // It works the same whether the model is assembled or dismantled.
     this.zoomActive = false;
-    this.zoomSensitivity = 1.5; // >1 = a small hand movement zooms more
-    this.zoomSmoothing = 9; // higher = snappier, lower = silkier
+    this.zoomSensitivity = 1.5;
+    this.zoomSmoothing = 9;
     this.zoomStartHandDistance = 0;
     this.zoomStartCamDistance = 0;
     this.zoomTargetDistance = null;
-
-    // Reusable temporaries (no per-frame allocations)
     this._offsetVec = new THREE.Vector3();
     this._pivotA = new THREE.Vector3();
     this._pivotB = new THREE.Vector3();
     this._euler = new THREE.Euler();
+    this._v1 = new THREE.Vector3();
+    this._v2 = new THREE.Vector3();
+    this._partDepthVector = new THREE.Vector3();
+
+    this._setupPointerOverlay();
 
     this.resizeObserver = new ResizeObserver(() => this.onWindowResize());
     this.resizeObserver.observe(container);
     window.addEventListener("resize", this.onWindowResize);
   }
 
-  // ======================================================================
-  // PARTICLES
-  // ======================================================================
-
-  createExplosionParticles() {
-    this.disposeExplosionParticles();
-
-    const count = this.particleCount;
-    const geometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(count * 3);
-    const velocities = new Float32Array(count * 3);
-
-    for (let i = 0; i < count; i++) {
-      const i3 = i * 3;
-      const angle = Math.random() * Math.PI * 2;
-      const radius = 0.4 + Math.random() * 2.2;
-      const height = (Math.random() - 0.5) * 2.2;
-
-      positions[i3] = Math.cos(angle) * radius;
-      positions[i3 + 1] = height;
-      positions[i3 + 2] = Math.sin(angle) * radius;
-
-      velocities[i3] = Math.cos(angle) * (0.25 + Math.random() * 0.5);
-      velocities[i3 + 1] = (Math.random() - 0.5) * 0.45;
-      velocities[i3 + 2] = Math.sin(angle) * (0.25 + Math.random() * 0.5);
-    }
-
-    // FIX: the GPU attribute gets its OWN copy of the array. Previously the
-    // attribute array and the "base" array were the same Float32Array, so each
-    // frame the base positions were overwritten and then re-scaled again,
-    // compounding exponentially.
-    geometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(positions.slice(), 3),
-    );
-
-    const material = new THREE.PointsMaterial({
-      color: 0x65dfff,
-      size: 0.035,
-      transparent: true,
-      opacity: 0.75,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      sizeAttenuation: true,
-    });
-
-    this.explosionParticles = new THREE.Points(geometry, material);
-    this.explosionParticles.visible = false;
-    // Positions change every frame, so the initial bounding sphere is stale.
-    this.explosionParticles.frustumCulled = false;
-    // Centre the cloud on the model and scale it with the model's size.
-    this.explosionParticles.position.copy(this.modelTarget);
-    this.explosionParticles.scale.setScalar(Math.max(this.modelRadius / 2.2, 0.5));
-    this.scene.add(this.explosionParticles);
-
-    this.particleBase = positions;
-    this.particleVelocities = velocities;
+  setHandPointer(pointer) {
+    this.pointer = pointer
+      ? { x: pointer.x, y: pointer.y, pinching: !!pointer.pinching }
+      : null;
   }
 
-  updateExplosionParticles(factor, dt = 0.016) {
-    if (!this.explosionParticles || !this.particleBase) return;
-
-    const value = THREE.MathUtils.clamp(factor, 0, 1);
-
-    if (value <= 0.02) {
-      this.explosionParticles.visible = false;
+  _stepPointer(dt) {
+    const pointer = this.pointer;
+    if (!pointer) {
+      this.pointerSmooth = null;
       return;
     }
 
-    const attribute = this.explosionParticles.geometry.attributes.position;
-    const positions = attribute.array;
-    const base = this.particleBase;
-    const velocities = this.particleVelocities;
-    const radial = 0.25 + value * 1.8;
+    const reach = this.pointerReach;
+    const targetX = THREE.MathUtils.clamp(
+      (pointer.x - 0.5) * reach + 0.5,
+      0,
+      1,
+    );
+    const targetY = THREE.MathUtils.clamp(
+      (pointer.y - 0.5) * reach + 0.5,
+      0,
+      1,
+    );
 
-    for (let i = 0; i < positions.length; i++) {
-      positions[i] = base[i] * radial + velocities[i] * value;
+    if (!this.pointerSmooth) {
+      this.pointerSmooth = {
+        x: targetX,
+        y: targetY,
+        pinching: pointer.pinching,
+      };
+      return;
     }
 
-    // FIX: needsUpdate must be set on the BufferAttribute, not on the raw
-    // typed array (that flag was silently ignored, so nothing re-uploaded).
-    attribute.needsUpdate = true;
+    const alpha = 1 - Math.exp(-24 * Math.max(dt, 0.001));
+    this.pointerSmooth.x += (targetX - this.pointerSmooth.x) * alpha;
+    this.pointerSmooth.y += (targetY - this.pointerSmooth.y) * alpha;
+    this.pointerSmooth.pinching = pointer.pinching;
+  }
 
-    this.explosionParticles.visible = true;
-    this.explosionParticles.rotation.y += dt * 0.15 * value;
-    this.explosionParticles.material.opacity = THREE.MathUtils.clamp(
-      value * 1.5,
-      0,
-      0.75,
+  _setPartPointerRay() {
+    const ps = this.pointerSmooth;
+    if (!ps || !this.width || !this.height) return false;
+
+    this.partPointerNdc.set(ps.x * 2 - 1, 1 - ps.y * 2);
+    this.camera.updateMatrixWorld();
+    this.currentModelRoot?.updateMatrixWorld(true);
+    this.partRaycaster.setFromCamera(this.partPointerNdc, this.camera);
+    return true;
+  }
+
+  _pickGLBPart() {
+    if (!this.currentParts.length || !this._setPartPointerRay()) return null;
+
+    const roots = this.currentParts
+      .map((part) => part.object)
+      .filter((object) => object && object.visible);
+    if (!roots.length) return null;
+
+    const hits = this.partRaycaster.intersectObjects(roots, true);
+    for (const hit of hits) {
+      let node = hit.object;
+      while (node) {
+        const part = this.currentParts.find(
+          (candidate) => candidate.object === node,
+        );
+        if (part) return { part, hit };
+        node = node.parent;
+      }
+    }
+    return null;
+  }
+
+  _releaseGLBPart() {
+    this.partGrab = null;
+  }
+
+  _updatePartInteraction(dt, progress) {
+    const ps = this.pointerSmooth;
+    const canGrab =
+      this.partGrabEnabled &&
+      !!ps &&
+      !this.zoomActive &&
+      this.currentParts.length > 0 &&
+      progress > 0.035;
+
+    if (!canGrab) {
+      this._releaseGLBPart();
+      this.partHover = null;
+      this.partWasPinching = false;
+      this._updatePartPointerOverlay();
+      return;
+    }
+
+    let picked = null;
+
+    if (ps.pinching && !this.partWasPinching && !this.partGrab) {
+      picked = this._pickGLBPart();
+      if (picked) {
+        const { part, hit } = picked;
+        this.camera.getWorldDirection(this.partCameraDirection).normalize();
+        this.partGrabPlane.setFromNormalAndCoplanarPoint(
+          this.partCameraDirection,
+          hit.point,
+        );
+        part.object.getWorldPosition(this.partGrabObjectWorld);
+        this.partGrabOffset.copy(this.partGrabObjectWorld).sub(hit.point);
+        this.partGrab = { part };
+        this.partHover = part;
+      }
+    }
+
+    if (ps.pinching && this.partGrab) {
+      if (this._setPartPointerRay()) {
+        const intersection = this.partRaycaster.ray.intersectPlane(
+          this.partGrabPlane,
+          this.partGrabIntersection,
+        );
+
+        if (intersection) {
+          const part = this.partGrab.part;
+          const parent = part.object.parent;
+          this.partGrabTargetWorld.copy(intersection).add(this.partGrabOffset);
+
+          if (parent) {
+            parent.updateMatrixWorld(true);
+            this.partGrabTargetLocal.copy(this.partGrabTargetWorld);
+            parent.worldToLocal(this.partGrabTargetLocal);
+          } else {
+            this.partGrabTargetLocal.copy(this.partGrabTargetWorld);
+          }
+
+          if (!part._manualOffset) part._manualOffset = new THREE.Vector3();
+
+          const basePosition = part._dismantleBasePosition || part.originalPos;
+          const safeProgress = Math.max(progress, 0.035);
+
+          part._manualOffset
+            .copy(this.partGrabTargetLocal)
+            .sub(basePosition)
+            .multiplyScalar(1 / safeProgress);
+          part.object.position.copy(this.partGrabTargetLocal);
+          this.partHover = part;
+          this.currentModelRoot?.updateMatrixWorld(true);
+        }
+      }
+    } else if (!ps.pinching && this.partGrab) {
+      this._releaseGLBPart();
+    }
+
+    if (!ps.pinching || !this.partGrab) {
+      picked = this._pickGLBPart();
+      this.partHover = picked?.part || null;
+    }
+
+    this.partWasPinching = ps.pinching;
+    this._updatePartPointerOverlay();
+  }
+
+  _updatePartPointerOverlay() {
+    const o = this.overlay;
+    if (!o) return;
+
+    const ps = this.pointerSmooth;
+    if (!ps || this.zoomActive) {
+      o.cursor.style.display = "none";
+      this._hideTarget();
+      return;
+    }
+
+    const px = ps.x * this.width;
+    const py = ps.y * this.height;
+    o.cursor.style.display = "block";
+    o.cursor.style.transform = `translate(${px}px,${py}px) translate(-50%,-50%)`;
+
+    if (o.pinchShown !== ps.pinching) {
+      o.pinchShown = ps.pinching;
+      o.cursor.style.width = o.cursor.style.height = ps.pinching
+        ? "22px"
+        : "34px";
+      o.cursor.style.borderColor = ps.pinching
+        ? "#ff6cb7"
+        : "rgba(101,223,255,.95)";
+      o.cursor.style.background = ps.pinching
+        ? "rgba(255,108,183,.35)"
+        : "transparent";
+    }
+
+    const part = this.partGrab?.part || this.partHover;
+    if (!part || !part.object) {
+      this._hideTarget();
+      return;
+    }
+
+    this.currentModelRoot?.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+    this.partBounds.setFromObject(part.object);
+    this.partBounds.getCenter(this.partProjected);
+    const cameraForward = this.camera.getWorldDirection(
+      this.partCameraDirection,
     );
+    const depth = this._partDepthVector
+      .copy(this.partProjected)
+      .sub(this.camera.position)
+      .dot(cameraForward);
+    if (depth <= 0) {
+      this._hideTarget();
+      return;
+    }
+
+    this.partProjected.project(this.camera);
+    const x = (this.partProjected.x * 0.5 + 0.5) * this.width;
+    const y = (-this.partProjected.y * 0.5 + 0.5) * this.height;
+    if (x < -40 || x > this.width + 40 || y < -40 || y > this.height + 40) {
+      this._hideTarget();
+      return;
+    }
+
+    const flip = x > this.width * 0.65;
+    const below = y < 70;
+    const dx = flip ? -30 : 30;
+    const dy = below ? 34 : -34;
+    const holding = !!this.partGrab;
+
+    o.ring.style.display = "block";
+    o.ring.style.transform = `translate(${x}px,${y}px) translate(-50%,-50%)`;
+    o.ring.style.borderColor = holding ? "#ff6cb7" : "#ffffff";
+    o.line.style.display = "block";
+    o.line.setAttribute("x1", x);
+    o.line.setAttribute("y1", y);
+    o.line.setAttribute("x2", x + dx);
+    o.line.setAttribute("y2", y + dy);
+
+    const stateText = holding
+      ? "DRAGGING · RELEASE TO DROP"
+      : "PINCH TO MOVE PART";
+    const key = `${part.partName || "GLB component"}|${stateText}`;
+    if (o.labelKey !== key) {
+      o.labelKey = key;
+      o.nameEl.textContent = part.partName || "GLB component";
+      o.stateEl.textContent = stateText;
+    }
+    o.label.style.display = "block";
+    o.label.style.transform =
+      `translate(${x + dx}px,${y + dy}px) ` +
+      `translate(${flip ? "-100%" : "0"},${below ? "0" : "-100%"})`;
   }
 
   disposeExplosionParticles() {
     if (!this.explosionParticles) return;
-
     this.scene.remove(this.explosionParticles);
-    this.explosionParticles.geometry.dispose();
-    this.explosionParticles.material.dispose();
+    this.explosionParticles.geometry?.dispose();
+    this.explosionParticles.material?.map?.dispose();
+    this.explosionParticles.material?.dispose();
     this.explosionParticles = null;
-    this.particleBase = null;
-    this.particleVelocities = null;
   }
 
-  // ======================================================================
-  // SCENE SETUP
-  // ======================================================================
+  _setupPointerOverlay() {
+    if (getComputedStyle(this.container).position === "static") {
+      this.container.style.position = "relative";
+    }
+
+    const root = document.createElement("div");
+    root.setAttribute("aria-hidden", "true");
+    root.style.cssText =
+      "position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:6;";
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("height", "100%");
+    svg.style.cssText = "position:absolute;inset:0;overflow:visible;";
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("stroke", "rgba(101,223,255,0.9)");
+    line.setAttribute("stroke-width", "1.5");
+    line.style.display = "none";
+    svg.appendChild(line);
+
+    const cursor = document.createElement("div");
+    cursor.style.cssText =
+      "position:absolute;left:0;top:0;width:34px;height:34px;box-sizing:border-box;" +
+      "border:2px solid rgba(101,223,255,.95);border-radius:50%;" +
+      "box-shadow:0 0 14px rgba(101,223,255,.7);display:none;will-change:transform;" +
+      "transition:width .12s,height .12s,background .12s,border-color .12s;";
+    const dot = document.createElement("div");
+    dot.style.cssText =
+      "position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;" +
+      "border-radius:50%;background:#fff;";
+    cursor.appendChild(dot);
+
+    const ring = document.createElement("div");
+    ring.style.cssText =
+      "position:absolute;left:0;top:0;width:22px;height:22px;box-sizing:border-box;" +
+      "border:2px solid #fff;border-radius:50%;box-shadow:0 0 10px rgba(255,255,255,.8);" +
+      "display:none;will-change:transform;";
+
+    const label = document.createElement("div");
+    label.style.cssText =
+      "position:absolute;left:0;top:0;padding:4px 9px;" +
+      "font:600 11px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;" +
+      "color:#e8fbff;background:rgba(8,20,34,.85);border:1px solid rgba(101,223,255,.7);" +
+      "border-radius:6px;white-space:nowrap;display:none;will-change:transform;";
+    const nameEl = document.createElement("span");
+    nameEl.style.display = "block";
+    const stateEl = document.createElement("span");
+    stateEl.style.cssText =
+      "display:block;font-size:9px;opacity:.7;letter-spacing:.14em;";
+    label.append(nameEl, stateEl);
+
+    root.append(svg, ring, label, cursor);
+    this.container.appendChild(root);
+
+    this.overlay = {
+      root,
+      line,
+      cursor,
+      ring,
+      label,
+      nameEl,
+      stateEl,
+      pinchShown: false,
+      labelKey: "",
+    };
+  }
+
+  _hideTarget() {
+    const o = this.overlay;
+    o.ring.style.display = "none";
+    o.line.style.display = "none";
+    o.label.style.display = "none";
+  }
 
   setupLighting() {
     const hemisphere = new THREE.HemisphereLight(0xc6e7ff, 0x1b2636, 1.8);
@@ -254,11 +487,7 @@ export class SceneManager {
   }
 
   setupEnvironment() {
-    // Intentionally no floor, ground plane, grid or pedestal. The model floats
-    // cleanly against the CSS studio gradient, so no part appears to intersect
-    // an artificial surface.
     this.pedestal = null;
-    this.particles = null;
   }
 
   disposeObject(object) {
@@ -288,17 +517,22 @@ export class SceneManager {
     if (this.currentModelRoot) {
       const previousRoot = this.currentModelRoot;
       this.scene.remove(previousRoot);
-      // Release the previous model before the new one is rendered. This avoids
-      // briefly keeping two large GLBs' GPU resources alive at the same time.
       this.disposeObject(previousRoot);
     }
 
-    // A new model must never inherit a half-finished zoom gesture.
     this.endTwoHandZoom();
     this.zoomTargetDistance = null;
+    this._releaseGLBPart();
+    this.partHover = null;
+    this.partWasPinching = false;
+    this.disposeExplosionParticles();
 
     this.currentModelRoot = modelData.root;
     this.currentParts = modelData.parts || [];
+    this.currentParts.forEach((part) => {
+      part._manualOffset = new THREE.Vector3();
+      part._dismantleBasePosition = new THREE.Vector3();
+    });
     this.currentModelRoot.position.set(0, 0, 0);
     this.currentModelRoot.rotation.set(0, 0, 0);
     this.scene.add(this.currentModelRoot);
@@ -315,8 +549,6 @@ export class SceneManager {
       this.modelRadius = 2.2;
     }
 
-    // How far the farthest part travels when fully dismantled. Used so the
-    // zoom limits always allow the whole exploded model to fit on screen.
     let maxOffset = 0;
     this.currentParts.forEach((part) => {
       if (part.explodeOffset) {
@@ -329,8 +561,6 @@ export class SceneManager {
 
     this.controls.target.copy(this.modelTarget);
     this.fitCameraToModel();
-
-    if (this.particlesEnabled) this.createExplosionParticles();
   }
 
   fitCameraToModel() {
@@ -346,9 +576,6 @@ export class SceneManager {
     this.camera.near = Math.max(0.03, distance / 220);
     this.camera.far = Math.max(120, distance * 14);
     this.camera.updateProjectionMatrix();
-
-    // Zoom limits scale with the model so dismantled models can be zoomed out
-    // far enough to see every part, and zoomed in without clipping inside.
     this.controls.minDistance = Math.max(1.2, this.modelRadius * 0.4);
     this.controls.maxDistance = Math.max(
       35,
@@ -367,17 +594,20 @@ export class SceneManager {
 
   applyHandRotation(rotation, opennessFactor, isHandPresent, dt = 0.016) {
     if (!this.currentModelRoot) return;
-
-    // While zooming with two hands the model's orientation is frozen so the
-    // zoom gesture never twists the model.
     if (this.zoomActive) return;
 
     if (isHandPresent && rotation) {
       this.isHandControllingRotation = true;
-      const targetY = rotation.roll * 1.65 + rotation.yaw * 1.25;
-      const targetX = -rotation.yaw * 0.25;
-      const targetZ = -rotation.roll * 0.22;
-      const alpha = 1 - Math.exp(-9 * dt);
+      const roll = THREE.MathUtils.clamp(rotation.roll || 0, -1.35, 1.35);
+      const yaw = THREE.MathUtils.clamp(rotation.yaw || 0, -0.9, 0.9);
+      const targetY = THREE.MathUtils.clamp(
+        roll * 3.4 + yaw * 2.5,
+        -2.75,
+        2.75,
+      );
+      const targetX = THREE.MathUtils.clamp(-yaw * 0.95, -0.9, 0.9);
+      const targetZ = THREE.MathUtils.clamp(-roll * 0.78, -1.05, 1.05);
+      const alpha = 1 - Math.exp(-12.5 * dt);
       this.currentModelRoot.rotation.y = THREE.MathUtils.lerp(
         this.currentModelRoot.rotation.y,
         targetY,
@@ -427,20 +657,12 @@ export class SceneManager {
   // TWO-HAND ZOOM
   // ======================================================================
 
-  /**
-   * Call with the current distance between the two hands every time the
-   * tracker reports `twoHand.active`. The first call starts the gesture.
-   * It only moves the camera, never touches the dismantle state, so it works
-   * identically when the model is assembled or exploded.
-   */
   updateTwoHandZoom(handDistance) {
     if (!(handDistance > 0)) return;
     if (!this.zoomActive) this.beginTwoHandZoom(handDistance);
 
     const ratio =
       this.zoomStartHandDistance / Math.max(handDistance, MIN_HAND_DISTANCE);
-    // Hands apart  -> ratio < 1 -> camera moves closer (zoom in)
-    // Hands closer -> ratio > 1 -> camera moves away  (zoom out)
     const target =
       this.zoomStartCamDistance * Math.pow(ratio, this.zoomSensitivity);
 
@@ -453,7 +675,6 @@ export class SceneManager {
 
   beginTwoHandZoom(handDistance) {
     if (!(handDistance > 0)) return;
-    // A running camera preset transition would fight the zoom.
     this.isTransitioningCamera = false;
     this.zoomActive = true;
     this.zoomStartHandDistance = Math.max(handDistance, MIN_HAND_DISTANCE);
@@ -463,7 +684,6 @@ export class SceneManager {
     this.zoomTargetDistance = this.zoomStartCamDistance;
   }
 
-  /** The camera keeps gliding to its last target after this, then stops. */
   endTwoHandZoom() {
     this.zoomActive = false;
   }
@@ -480,7 +700,6 @@ export class SceneManager {
       return;
     }
 
-    // Interpolate in log-space so zooming in and out feel equally fast.
     const alpha = 1 - Math.exp(-this.zoomSmoothing * dt);
     let next = current * Math.pow(this.zoomTargetDistance / current, alpha);
 
@@ -504,22 +723,23 @@ export class SceneManager {
    */
   updateDismantle(factor, handRotation = null, dt = 0.016) {
     const value = THREE.MathUtils.clamp(factor, 0, 1);
-
-    // FIX: a single smoothstep. Previously the value was smoothed twice
-    // (manual smoothstep + MathUtils.smoothstep) on top of the tracker's own
-    // smoothing, which made the start/end of the motion feel laggy.
     const progress = value * value * (3 - 2 * value);
+    this._stepPointer(dt);
 
-    this.updateExplosionParticles(progress, dt);
+    if (!this.currentParts.length) {
+      this._updatePartPointerOverlay();
+      return;
+    }
 
-    if (!this.currentParts.length) return;
+    if (progress <= 0.02) {
+      this._releaseGLBPart();
+      this.partHover = null;
+      this.currentParts.forEach((part) => part._manualOffset?.set(0, 0, 0));
+    }
 
     const spread = this.spreadMultiplier * this.baseSpreadScale;
     const effectiveSpread = spread * progress;
     const rotAmount = spread * progress;
-
-    // FIX: no hard `value > 0.12` switch (it caused a visible pop). The spin
-    // already scales with `progress`, so it fades in on its own.
     const spinAngle = handRotation
       ? (THREE.MathUtils.clamp(handRotation.roll, -1.2, 1.2) * 0.65 +
           handRotation.yaw * 0.45) *
@@ -531,7 +751,6 @@ export class SceneManager {
     const euler = this._euler;
 
     this.currentParts.forEach((part, index) => {
-      // Lazily created, cached per part.
       if (!part._baseQuat) {
         part._baseQuat = new THREE.Quaternion().setFromEuler(part.originalRot);
         part._offsetQuat = new THREE.Quaternion();
@@ -544,7 +763,6 @@ export class SceneManager {
         part._spinAxis.normalize();
       }
 
-      // ---- Rotation (all rotations are in the model's parent space) ------
       let finalQuat = part._finalQuat.copy(part._baseQuat);
 
       if (part.explodeRotOffset) {
@@ -557,8 +775,6 @@ export class SceneManager {
         finalQuat.premultiply(part._offsetQuat);
       }
 
-      // FIX: the spin axis is expressed in parent space, so the spin must be
-      // PRE-multiplied. Post-multiplying rotated it around a local axis.
       if (spinAngle !== 0) {
         part._spinQuat.setFromAxisAngle(
           part._spinAxis,
@@ -568,12 +784,6 @@ export class SceneManager {
       }
 
       part.object.quaternion.copy(finalQuat);
-
-      // ---- Position -------------------------------------------------------
-      // FIX: rotate each part around its own centre instead of the group
-      // origin. The procedural models keep every group at (0,0,0) with the
-      // meshes offset inside it, so rotating the group used to swing the part
-      // around the model origin instead of spinning it in place.
       part.object.position
         .copy(part.originalPos)
         .addScaledVector(part.explodeOffset, effectiveSpread);
@@ -584,7 +794,18 @@ export class SceneManager {
         pivotB.copy(pivot).applyQuaternion(finalQuat);
         part.object.position.add(pivotA).sub(pivotB);
       }
+
+      if (!part._dismantleBasePosition) {
+        part._dismantleBasePosition = new THREE.Vector3();
+      }
+      part._dismantleBasePosition.copy(part.object.position);
+      if (part._manualOffset && progress > 0.02) {
+        part.object.position.addScaledVector(part._manualOffset, progress);
+      }
     });
+
+    this.currentModelRoot?.updateMatrixWorld(true);
+    this._updatePartInteraction(dt, progress);
   }
 
   // ======================================================================
@@ -634,7 +855,6 @@ export class SceneManager {
   };
 
   render(dt = 0.016) {
-    // A long frame (tab switch, GC pause) must not cause a camera jump.
     dt = Math.min(dt, 0.1);
 
     if (this.isTransitioningCamera && !this.zoomActive) {
@@ -671,6 +891,8 @@ export class SceneManager {
     this.controls.dispose();
     if (this.currentModelRoot) this.disposeObject(this.currentModelRoot);
     this.disposeExplosionParticles();
+    this.overlay?.root.remove();
+    this.overlay = null;
     this.renderer.dispose();
     this.container.innerHTML = "";
   }

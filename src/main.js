@@ -66,7 +66,7 @@ let lastFrameTime = performance.now();
 let customModelUrl = "";
 
 // ============================================================
-// YOUR EXISTING GLB MODELS
+// EXISTING GLB MODELS
 // ============================================================
 
 const GLB_MODELS = {
@@ -180,7 +180,6 @@ async function loadModel(modelKey) {
   try {
     showToast(`Loading ${config.name}…`, 5000);
 
-    // Disable model buttons while loading
     modelBtns.forEach((button) => {
       button.disabled = true;
     });
@@ -206,7 +205,6 @@ async function loadModel(modelKey) {
 
     updateOpennessDisplay(0);
 
-    // Update selected model button
     modelBtns.forEach((button) => {
       button.classList.toggle("active", button.dataset.model === modelKey);
     });
@@ -303,12 +301,19 @@ function highlightPartInList(part) {
 }
 
 function handleHandTrackingUpdate(data) {
-  // ---- Two-hand zoom -------------------------------------------------
-  // Drives the camera only. It never touches the dismantle factor, so the
-  // model stays exactly as it is (assembled, partly or fully separated).
   const twoHand = data.twoHand;
   if (twoHand?.active) sceneMgr?.updateTwoHandZoom(twoHand.distance);
   else sceneMgr?.endTwoHandZoom();
+
+  if (data.pointer && !twoHand?.active) {
+    sceneMgr?.setHandPointer({
+      x: isCameraMirrored ? 1 - data.pointer.x : data.pointer.x,
+      y: data.pointer.y,
+      pinching: data.pointer.pinching,
+    });
+  } else {
+    sceneMgr?.setHandPointer(null);
+  }
 
   statFps.textContent = String(data.fps || 0);
 
@@ -320,13 +325,14 @@ function handleHandTrackingUpdate(data) {
       ? `ZOOM ${twoHand.distance.toFixed(2)}`
       : "ZOOM";
   } else if (data.isDetected) {
-    const gesture = data.gestureText || "TRACKING";
-    gestureBadge.textContent = gesture;
+    gestureBadge.textContent = data.gestureText || "TRACKING";
     gestureBadge.className = "gesture-badge";
-    if (gesture === "OPEN HAND") gestureBadge.classList.add("open");
-    if (gesture === "CLOSED FIST") gestureBadge.classList.add("fist");
-    statFingers.textContent = `${data.fingersCount}/5`;
-    statDist.textContent = data.rotation ? `${data.rotation.rollDeg}°` : "—";
+    if (data.rightGesture === "OPEN HAND") gestureBadge.classList.add("open");
+    if (data.rightGesture === "CLOSED FIST") gestureBadge.classList.add("fist");
+    if (data.leftGesture === "PINCH GRAB") gestureBadge.classList.add("open");
+    statFingers.textContent = data.rightGesture ? `${data.fingersCount}/5` : "—";
+    statDist.textContent =
+      data.rightGesture && data.rotation ? `${data.rotation.rollDeg}°` : "—";
   } else {
     gestureBadge.textContent = "NO HAND";
     gestureBadge.className = "gesture-badge";
@@ -357,7 +363,6 @@ function updateOpennessDisplay(factor) {
     dismantleStateVal.className = "tel-val state-moving";
   }
 
-  // The separation state is held while zooming; just flag that zoom is on.
   if (handTracker?.isTwoHands) {
     dismantleStateVal.textContent += " · ZOOM";
   }
@@ -618,18 +623,12 @@ function animate(now) {
 
   let handRotation = null;
   if (!manualOverrideActive && handTracker?.isRunning) {
-    // FIX: the old code forced currentFactor = 0 whenever two hands were
-    // visible, which collapsed the model back to assembled during zoom.
-    // The tracker now freezes its openness while two hands are visible, so
-    // the model simply stays in whatever state it was in. It still returns
-    // smoothly to zero when the hands leave the frame.
     currentFactor = handTracker.getSmoothOpenness(dt);
     if (handTracker.isHandPresent) {
       handRotation = handTracker.getSmoothRotation(dt);
     }
   }
 
-  // The scene freezes the model's rotation by itself while zoom is active.
   sceneMgr.applyHandRotation(
     handRotation,
     currentFactor,
@@ -644,7 +643,6 @@ function animate(now) {
     sound.playExplodeCompleteSound();
   lastFactorAudioCheck = currentFactor;
 
-  // Particles are now updated inside updateDismantle (dt is needed for them).
   sceneMgr.updateDismantle(currentFactor, handRotation, dt);
   updateOpennessDisplay(currentFactor);
   labelMgr.update(currentFactor, sceneMgr.width, sceneMgr.height);

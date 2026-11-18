@@ -1,13 +1,93 @@
-# Kinetic Dismantle — updated build
+# Kinetic Dismantle
 
-A Three.js exploded-view studio with MediaPipe hand tracking, a restart-safe camera lifecycle, component inspection, and custom GLB/GLTF import.
+> An interactive 3D exploded-view studio powered by Three.js and MediaPipe hand tracking.
 
-## Project structure
+Kinetic Dismantle lets you interact with 3D models using natural hand gestures. Open your palm to separate model components, close your hand to reassemble them, and rotate the model by moving or tilting your hand.
+
+The application also supports mouse controls, manual dismantling, component inspection, and custom `.glb` / `.gltf` model importing.
+
+---
+
+## ✨ Features
+
+- 🖐️ **Real-time hand tracking**
+  - Powered by MediaPipe Hands
+  - Live hand landmark visualization
+  - Open-palm and closed-fist gesture detection
+
+- 💥 **Interactive exploded view**
+  - Open your hand to dismantle the model
+  - Close your hand to reassemble it
+  - Smooth component transitions
+
+- 🔄 **Hand-controlled rotation**
+  - Move and tilt your hand to rotate the 3D model
+  - Smooth rotational response
+
+- 🖱️ **Mouse controls**
+  - Left drag — orbit / rotate
+  - Scroll — zoom
+  - Right drag — pan
+
+- 🎛️ **Manual dismantle control**
+  - Use the separation slider when a camera is not available
+  - Useful for testing and demonstrations
+
+- 📦 **Custom 3D model import**
+  - Import `.glb`
+  - Import `.gltf`
+  - Self-contained `.glb` files are recommended
+
+- 🔍 **Component inspection**
+  - Displays detected model components
+  - Allows individual component inspection
+  - Shows component information in the interface
+
+- 🏗️ **GLB / GLTF support**
+  - Existing 3D models can be loaded directly
+  - Original world transforms are preserved
+
+- 📷 **Restart-safe camera**
+  - Camera can be stopped and restarted safely
+  - A fresh MediaPipe instance is created for every camera session
+  - Media streams are properly cleaned up
+
+- 🎨 **Professional 3D interface**
+  - Dark visualization-studio UI
+  - Floating controls
+  - Model selection
+  - Camera status
+  - Telemetry
+  - View controls
+
+---
+
+# Install Dependencies
+
+```text
+npm install
+```
+
+# Run Project
+
+```text
+npm run dev
+```
+
+# 🖥️ Project Structure
 
 ```text
 kinetic-dismantle-updated/
+│
 ├── index.html
 ├── server.mjs
+├── README.md
+│
+├── models/
+|   ├── human_heart.glb
+|   ├── korean_building.glb
+|   ├── porche.glb
+|   └── robo_dog.glb
 └── src/
     ├── audio.js
     ├── handTracker.js
@@ -16,38 +96,3 @@ kinetic-dismantle-updated/
     ├── models.js
     ├── scene.js
     └── style.css
-```
-
-## Run it
-
-1. Install Node.js 18 or newer.
-2. Open a terminal in this folder.
-3. Run:
-
-   ```bash
-   node server.mjs
-   ```
-
-4. Open `http://localhost:3000` in Chrome or Edge.
-5. Allow camera access when prompted.
-
-The page loads Three.js, MediaPipe Hands, and Google Fonts from their CDNs, so an internet connection is required. Webcam access works on `localhost` or an HTTPS deployment; opening `index.html` directly with `file://` is not supported.
-
-## Controls
-
-- Open palm: separate the model components.
-- Closed fist: assemble the model.
-- Move/tilt the hand: rotate the model.
-- Manual control slider: test separation without a camera.
-- Drag: orbit; scroll: zoom; right-drag: pan.
-- Import: load a `.glb` or `.gltf` file. A self-contained `.glb` is the easiest format to import.
-
-## GLB component limitation
-
-The importer finds every static mesh node and preserves its original world transform while making it independently movable. If an asset contains a single combined mesh, the app cannot infer real wheels, doors, panels, or other semantic parts from the surface. It displays a warning and treats the asset as one component. For a true exploded view, export the desired pieces as separate objects/meshes from Blender or another 3D editor.
-
-Skinned/rigged assets are kept together as one assembly so their bone hierarchy is not broken.
-
-## Camera restart fix
-
-The tracking module no longer uses the MediaPipe `Camera` helper. It owns one `getUserMedia()` stream and a guarded requestAnimationFrame loop; stopping invalidates pending callbacks, closes the active `Hands` instance, stops every media track, detaches the video, and clears the overlay. Starting creates a fresh `Hands` instance and frame loop.

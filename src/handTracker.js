@@ -1,18 +1,3 @@
-/**
- * Restart-safe MediaPipe Hands tracker with two-hand zoom support.
- * Owns its webcam stream and animation loop. A new MediaPipe instance is
- * created for every camera session so stopping/restarting cannot reuse stale
- * Camera/Hands state.
- *
- * Two-hand behaviour:
- *  - While two hands are visible, openness/rotation targets are FROZEN, so
- *    the model keeps its current dismantled/assembled state while zooming.
- *  - The distance between the palms is reported in `twoHand.distance`.
- *  - If one hand drops out for a moment (very common), the zoom gesture and
- *    the frozen state are held for `twoHandHoldMs` so the model never
- *    collapses by accident.
- */
-
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -33,7 +18,8 @@ export class HandTracker {
     this.ctx = canvasElement.getContext('2d', { alpha: true });
     this.onUpdate = options.onUpdate || null;
     this.onStatus = options.onStatus || null;
-
+    this.rightHandLabel = options.rightHandLabel ?? 'Left';
+    this.zoomNeedsPinch = options.zoomNeedsPinch ?? true;
     this.hands = null;
     this.stream = null;
     this.trackEndHandlers = new Map();
@@ -46,7 +32,6 @@ export class HandTracker {
     this.lastVideoTime = -1;
     this.lastSentAt = 0;
     this.targetFrameInterval = 1000 / 30;
-
     this.smoothOpenness = 0;
     this.targetOpenness = 0;
     this.smoothingAlpha = 0.18;
@@ -54,7 +39,6 @@ export class HandTracker {
     this.fps = 0;
     this.frameCount = 0;
     this.lastFpsUpdate = performance.now();
-
     this.targetRoll = 0;
     this.smoothRoll = 0;
     this.targetYaw = 0;
@@ -62,26 +46,36 @@ export class HandTracker {
     this.targetLateralX = 0;
     this.smoothLateralX = 0;
     this.pulse = 0;
-
-    // Two-hand zoom
-    this.twoHandHoldMs = options.twoHandHoldMs ?? 500;
-    this.zoomSmoothing = options.zoomSmoothing ?? 0.35; // EMA factor per detection frame
-    this.lastTwoHandAt = -Infinity;
-    this.zoomDistance = null;
     this.lastFingersOpen = 0;
     this.lastPalmScale = '--';
-
+    this.twoHandHoldMs = options.twoHandHoldMs ?? 350;
+    this.zoomSmoothing = options.zoomSmoothing ?? 0.35;
+    this.lastZoomAt = -Infinity;
+    this.zoomDistance = null;
+    this.pinchOn = options.pinchOn ?? 0.35;
+    this.pinchOff = options.pinchOff ?? 0.55;
+    this.pinchHoldMs = options.pinchHoldMs ?? 350;
+    this.pinchState = { right: false, left: false };
+    this.lastRightPinchAt = -Infinity;
+    this.handLostHoldMs = options.handLostHoldMs ?? 350;
+    this.leftLostHoldMs = options.leftLostHoldMs ?? 200;
+    this.lastAnyHandAt = -Infinity;
+    this.lastLeftPointer = null;
+    this.lastLeftAt = -Infinity;
+    this.roleScore = 0;
+    this.singleRole = 'right';
+    this.lastSingleAt = -Infinity;
+    this.lastSingleWrist = null;
     this.video.muted = true;
     this.video.playsInline = true;
     this.video.autoplay = true;
   }
 
-  /** True while a two-hand zoom gesture is active (including the short dropout hold). */
   get isTwoHands() {
     return (
       this.isRunning &&
       this.zoomDistance !== null &&
-      performance.now() - this.lastTwoHandAt < this.twoHandHoldMs
+      performance.now() - this.lastZoomAt < this.twoHandHoldMs
     );
   }
 
@@ -124,7 +118,6 @@ export class HandTracker {
         }
       });
 
-      // A stop may have been requested while the permission prompt was open.
       if (token !== this.generation) {
         acquiredStream.getTracks().forEach(track => track.stop());
         return false;
@@ -160,7 +153,7 @@ export class HandTracker {
       this.hands = handsInstance;
 
       await handsInstance.setOptions({
-        maxNumHands: 2, // two hands are required for the zoom gesture
+        maxNumHands: 2,
         modelComplexity: 1,
         minDetectionConfidence: 0.62,
         minTrackingConfidence: 0.58
@@ -172,7 +165,6 @@ export class HandTracker {
         }
       });
 
-      // Set running before starting the frame loop so the first result is not dropped.
       this.isRunning = true;
       this.reportStatus('online');
       this.scheduleFrame(token);
@@ -190,7 +182,7 @@ export class HandTracker {
         this.video.srcObject = null;
         this.hands = null;
         if (handsInstance?.close) {
-          try { await handsInstance.close(); } catch { /* already disposed */ }
+          try { await handsInstance.close(); } catch {}
         }
         this.clearCanvas();
         this.reportStatus('error', error);
@@ -268,14 +260,12 @@ export class HandTracker {
       const onEnded = this.trackEndHandlers.get(track);
       if (onEnded) track.removeEventListener('ended', onEnded);
       this.trackEndHandlers.delete(track);
-      try { track.stop(); } catch { /* track already stopped */ }
+      try { track.stop(); } catch {}
     });
   }
 
   async stop() {
     if (this.stopPromise) return this.stopPromise;
-
-    // Invalidate callbacks and pending getUserMedia requests immediately.
     ++this.generation;
     this.isRunning = false;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
@@ -327,10 +317,19 @@ export class HandTracker {
     this.targetLateralX = 0;
     this.smoothLateralX = 0;
     this.pulse = 0;
-    this.lastTwoHandAt = -Infinity;
-    this.zoomDistance = null;
     this.lastFingersOpen = 0;
     this.lastPalmScale = '--';
+    this.lastZoomAt = -Infinity;
+    this.zoomDistance = null;
+    this.pinchState = { right: false, left: false };
+    this.lastRightPinchAt = -Infinity;
+    this.lastAnyHandAt = -Infinity;
+    this.lastLeftPointer = null;
+    this.lastLeftAt = -Infinity;
+    this.roleScore = 0;
+    this.singleRole = 'right';
+    this.lastSingleAt = -Infinity;
+    this.lastSingleWrist = null;
   }
 
   reportStatus(status, error = null) {
@@ -346,8 +345,11 @@ export class HandTracker {
         fingersCount: 0,
         palmScale: '--',
         gestureText: 'NO HAND',
+        rightGesture: null,
+        leftGesture: null,
         fps: 0,
         landmarks: null,
+        pointer: null,
         twoHand: { active: false, distance: null }
       });
     }
@@ -384,6 +386,66 @@ export class HandTracker {
     };
   }
 
+  resolveSingleRole(label, now, wrist) {
+    const vote = label === undefined ? 0 : (label === this.rightHandLabel ? 1 : -1);
+    const jumped = this.lastSingleWrist
+      ? Math.hypot(wrist.x - this.lastSingleWrist.x, wrist.y - this.lastSingleWrist.y) > 0.2
+      : false;
+    this.lastSingleWrist = { x: wrist.x, y: wrist.y };
+
+    if (now - this.lastSingleAt > 500 || jumped) {
+      if (vote !== 0) {
+        this.roleScore = vote;
+        this.singleRole = vote > 0 ? 'right' : 'left';
+      }
+    } else if (vote !== 0) {
+      this.roleScore = this.roleScore * 0.65 + vote * 0.35;
+      if (this.singleRole === 'right' && this.roleScore < -0.3) this.singleRole = 'left';
+      else if (this.singleRole === 'left' && this.roleScore > 0.3) this.singleRole = 'right';
+    }
+
+    this.lastSingleAt = now;
+    return this.singleRole;
+  }
+
+  buildHands(results, now) {
+    const list = results.multiHandLandmarks || [];
+    const labels = results.multiHandedness || [];
+    const hands = list.slice(0, 2).map((landmarks, i) => ({
+      landmarks,
+      label: labels[i]?.label,
+      role: null
+    }));
+
+    if (hands.length === 2) {
+      const rightIsSmallerX = this.rightHandLabel === 'Left';
+      const [a, b] = hands;
+      const aIsRight = rightIsSmallerX
+        ? a.landmarks[0].x < b.landmarks[0].x
+        : a.landmarks[0].x > b.landmarks[0].x;
+      a.role = aIsRight ? 'right' : 'left';
+      b.role = aIsRight ? 'left' : 'right';
+      this.lastSingleAt = -Infinity;
+    } else if (hands.length === 1) {
+      hands[0].role = this.resolveSingleRole(hands[0].label, now, hands[0].landmarks[0]);
+    }
+
+    hands.forEach(hand => {
+      const o = this.calculateOpenness(hand.landmarks);
+      hand.openness = o.openness;
+      hand.fingersOpen = o.fingersOpen;
+      hand.palmScale = o.palmScale;
+      hand.rotation = this.calculateHandRotation(hand.landmarks);
+      hand.pinch = this.updatePinch(hand.landmarks, o.palmScale, hand.role);
+    });
+
+    ['right', 'left'].forEach(role => {
+      if (!hands.some(h => h.role === role)) this.pinchState[role] = false;
+    });
+
+    return hands;
+  }
+
   processResults(results) {
     if (!this.isRunning) return;
 
@@ -400,136 +462,120 @@ export class HandTracker {
     this.ctx.clearRect(0, 0, width, height);
     this.pulse = (this.pulse + 0.08) % (Math.PI * 2);
 
-    const hands = results.multiHandLandmarks || [];
+    const hands = this.buildHands(results, now);
+    const right = hands.find(h => h.role === 'right');
+    const left = hands.find(h => h.role === 'left');
 
-    // ---------------------------------------------------------------- 2 hands
-    if (hands.length >= 2) {
-      this.processTwoHands(hands, width, height, now);
-      return;
-    }
+    hands.forEach(hand => {
+      this.drawHandSkeleton(hand.landmarks, width, height, hand.openness, hand.rotation, hand.role);
+      if (hand.pinch.pinching) this.drawPinchMarker(hand.pinch.x, hand.pinch.y, width, height, hand.role);
+    });
 
-    // One hand may briefly vanish in the middle of a zoom; keep the gesture.
-    const inZoomHold = now - this.lastTwoHandAt < this.twoHandHoldMs;
-    const landmarks = hands[0];
+    if (hands.length) this.lastAnyHandAt = now;
 
-    // ----------------------------------------------------------------- 1 hand
-    if (landmarks) {
-      const { openness, fingersOpen, palmScale } = this.calculateOpenness(landmarks);
-      const rotation = this.calculateHandRotation(landmarks);
+    const zoomNow = !!(right && left &&
+      (this.zoomNeedsPinch ? right.pinch.pinching && left.pinch.pinching : true));
 
+    if (zoomNow) {
+      this.lastZoomAt = now;
       this.isHandPresent = true;
-      this.drawHandSkeleton(landmarks, width, height, openness, rotation);
+      if (this.zoomNeedsPinch) this.lastRightPinchAt = now;
 
-      if (inZoomHold) {
-        // Do NOT touch targetOpenness: the model must keep its current state.
-        this.emitZoomHold(landmarks);
-        return;
-      }
+      const a = this.zoomNeedsPinch ? right.pinch : this.palmCenter(right.landmarks);
+      const b = this.zoomNeedsPinch ? left.pinch : this.palmCenter(left.landmarks);
+      const aspect = width / height;
+      const rawDistance = Math.hypot((a.x - b.x) * aspect, a.y - b.y);
 
-      this.zoomDistance = null;
-      this.targetOpenness = openness;
-      this.targetRoll = rotation.roll;
-      this.targetYaw = rotation.yaw;
-      this.targetLateralX = rotation.lateralX;
-      this.lastFingersOpen = fingersOpen;
-      this.lastPalmScale = palmScale.toFixed(2);
+      this.zoomDistance = this.zoomDistance === null
+        ? rawDistance
+        : this.zoomDistance + (rawDistance - this.zoomDistance) * this.zoomSmoothing;
 
-      let gesture = 'PARTIAL';
-      if (openness > 0.65) gesture = 'OPEN HAND';
-      else if (openness < 0.28) gesture = 'CLOSED FIST';
-
-      this.onUpdate?.({
-        isDetected: true,
-        handsCount: 1,
-        rawOpenness: openness,
-        fingersCount: fingersOpen,
-        palmScale: this.lastPalmScale,
-        gestureText: gesture,
-        fps: this.fps,
-        landmarks,
-        rotation: {
-          roll: rotation.roll,
-          yaw: rotation.yaw,
-          rollDeg: Math.round(rotation.roll * 180 / Math.PI),
-          yawDeg: Math.round(rotation.yaw * 180 / Math.PI)
-        },
-        twoHand: { active: false, distance: null }
-      });
+      this.drawZoomLink(a, b, width, height);
+      this.emitZoom(hands.length, hands[0].landmarks);
       return;
     }
 
-    // ---------------------------------------------------------------- no hand
+    const inZoomHold = this.zoomDistance !== null && now - this.lastZoomAt < this.twoHandHoldMs;
     if (inZoomHold) {
-      this.emitZoomHold(null);
+      this.isHandPresent = true;
+      this.emitZoom(hands.length, hands[0]?.landmarks || null);
       return;
     }
-
-    this.isHandPresent = false;
-    this.targetOpenness = 0;
     this.zoomDistance = null;
+    this.isHandPresent = hands.length > 0 || now - this.lastAnyHandAt < this.handLostHoldMs;
+
+    if (right) {
+      if (right.pinch.pinching) this.lastRightPinchAt = now;
+      const pinchHold = now - this.lastRightPinchAt < this.pinchHoldMs;
+
+      if (!pinchHold) {
+        this.targetOpenness = right.openness;
+        this.targetRoll = right.rotation.roll;
+        this.targetYaw = right.rotation.yaw;
+        this.targetLateralX = right.rotation.lateralX;
+        this.lastFingersOpen = right.fingersOpen;
+        this.lastPalmScale = right.palmScale.toFixed(2);
+      }
+    } else if (hands.length === 0 && now - this.lastAnyHandAt >= this.handLostHoldMs) {
+      this.targetOpenness = 0;
+    }
+
+    let pointer = null;
+    if (left) {
+      pointer = { x: left.pinch.x, y: left.pinch.y, pinching: left.pinch.pinching };
+      this.lastLeftPointer = pointer;
+      this.lastLeftAt = now;
+    } else if (this.lastLeftPointer && now - this.lastLeftAt < this.leftLostHoldMs) {
+      pointer = this.lastLeftPointer;
+    }
+
+    let rightGesture = null;
+    if (right) {
+      if (right.pinch.pinching) rightGesture = 'PINCH';
+      else if (right.openness > 0.65) rightGesture = 'OPEN HAND';
+      else if (right.openness < 0.28) rightGesture = 'CLOSED FIST';
+      else rightGesture = 'PARTIAL';
+    }
+    let leftGesture = null;
+    if (left) leftGesture = left.pinch.pinching ? 'PINCH GRAB' : 'READY';
+
+    const gestureText = [
+      rightGesture ? `R ${rightGesture}` : null,
+      leftGesture ? `L ${leftGesture}` : null
+    ].filter(Boolean).join(' · ') || 'NO HAND';
+
     this.onUpdate?.({
-      isDetected: false,
-      handsCount: 0,
-      rawOpenness: this.smoothOpenness,
-      fingersCount: 0,
-      palmScale: '--',
-      gestureText: 'NO HAND',
+      isDetected: hands.length > 0,
+      handsCount: hands.length,
+      rawOpenness: this.targetOpenness,
+      fingersCount: this.lastFingersOpen,
+      palmScale: this.lastPalmScale,
+      gestureText,
+      rightGesture,
+      leftGesture,
       fps: this.fps,
-      landmarks: null,
+      landmarks: (right || left)?.landmarks || null,
+      rotation: this.heldRotationPayload(),
+      pointer,
       twoHand: { active: false, distance: null }
     });
   }
 
-  processTwoHands(hands, width, height, now) {
-    this.lastTwoHandAt = now;
-    this.isHandPresent = true;
-
-    // Distance between the palms in "image-height" units, so horizontal and
-    // vertical movement count equally on a 4:3 / 16:9 camera.
-    const a = this.palmCenter(hands[0]);
-    const b = this.palmCenter(hands[1]);
-    const aspect = width / height;
-    const rawDistance = Math.hypot((a.x - b.x) * aspect, a.y - b.y);
-
-    this.zoomDistance = this.zoomDistance === null
-      ? rawDistance
-      : this.zoomDistance + (rawDistance - this.zoomDistance) * this.zoomSmoothing;
-
-    for (let i = 0; i < 2; i++) {
-      const { openness } = this.calculateOpenness(hands[i]);
-      this.drawHandSkeleton(hands[i], width, height, openness, this.calculateHandRotation(hands[i]));
-    }
-    this.drawZoomLink(a, b, width, height);
-
-    // targetOpenness / targetRoll / targetYaw are intentionally left alone.
+  emitZoom(handsCount, landmarks) {
     this.onUpdate?.({
-      isDetected: true,
-      handsCount: 2,
+      isDetected: handsCount > 0,
+      handsCount,
       rawOpenness: this.targetOpenness,
       fingersCount: this.lastFingersOpen,
       palmScale: this.lastPalmScale,
       gestureText: 'TWO-HAND ZOOM',
+      rightGesture: null,
+      leftGesture: null,
       fps: this.fps,
-      landmarks: hands[0],
-      allLandmarks: hands,
+      landmarks,
       rotation: this.heldRotationPayload(),
+      pointer: null,
       twoHand: { active: true, distance: this.zoomDistance }
-    });
-  }
-
-  emitZoomHold(landmarks) {
-    this.onUpdate?.({
-      isDetected: !!landmarks,
-      handsCount: landmarks ? 1 : 0,
-      rawOpenness: this.targetOpenness,
-      fingersCount: this.lastFingersOpen,
-      palmScale: this.lastPalmScale,
-      gestureText: 'TWO-HAND ZOOM',
-      fps: this.fps,
-      landmarks: landmarks || null,
-      rotation: this.heldRotationPayload(),
-      // Keep the gesture alive with the last known distance.
-      twoHand: { active: this.zoomDistance !== null, distance: this.zoomDistance }
     });
   }
 
@@ -572,6 +618,54 @@ export class HandTracker {
     return { roll, yaw, lateralX };
   }
 
+  updatePinch(landmarks, palmScale, role) {
+    const wrist = landmarks[0];
+    const thumb = landmarks[4];
+    const index = landmarks[8];
+    const gap = this.dist(thumb, index) / palmScale;
+
+    let othersTotal = 0;
+    [12, 16, 20].forEach(tip => {
+      othersTotal += this.dist(wrist, landmarks[tip]) / palmScale;
+    });
+
+    const othersAvg = othersTotal / 3;
+    const wasPinching = this.pinchState[role] === true;
+    const othersOk = othersAvg > (wasPinching ? 1.2 : 1.3);
+
+    let pinching = wasPinching;
+    if (wasPinching) {
+      if (gap > this.pinchOff || !othersOk) pinching = false;
+    } else if (gap < this.pinchOn && othersOk) {
+      pinching = true;
+    }
+    if (role) this.pinchState[role] = pinching;
+
+    return {
+      pinching,
+      x: (thumb.x + index.x) / 2,
+      y: (thumb.y + index.y) / 2
+    };
+  }
+
+  drawPinchMarker(nx, ny, width, height, role) {
+    const ctx = this.ctx;
+    const x = nx * width;
+    const y = ny * height;
+    const color = role === 'left' ? '255, 108, 183' : '167, 139, 250';
+    ctx.save();
+    ctx.shadowBlur = 14;
+    ctx.shadowColor = `rgba(${color}, 0.9)`;
+    ctx.beginPath();
+    ctx.arc(x, y, 11 + Math.sin(this.pulse) * 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${color}, 0.35)`;
+    ctx.fill();
+    ctx.strokeStyle = `rgb(${color})`;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   drawZoomLink(a, b, width, height) {
     const ctx = this.ctx;
     const ax = a.x * width;
@@ -604,12 +698,13 @@ export class HandTracker {
     ctx.restore();
   }
 
-  drawHandSkeleton(landmarks, width, height, openness, rotation = { roll: 0, yaw: 0 }) {
+  drawHandSkeleton(landmarks, width, height, openness, rotation = { roll: 0, yaw: 0 }, role = 'right') {
     const ctx = this.ctx;
+    const isLeft = role === 'left';
 
-    const red = Math.round(openness * 255);
-    const green = Math.round((1 - openness * 0.5) * 240);
-    const blue = Math.round(255 - openness * 120);
+    const red = isLeft ? 167 : Math.round(openness * 255);
+    const green = isLeft ? 139 : Math.round((1 - openness * 0.5) * 240);
+    const blue = isLeft ? 250 : Math.round(255 - openness * 120);
     const glowColor = `rgb(${red}, ${green}, ${blue})`;
 
     ctx.save();
@@ -626,7 +721,7 @@ export class HandTracker {
         start.x * width, start.y * height,
         end.x * width, end.y * height
       );
-      gradient.addColorStop(0, '#55e8ff');
+      gradient.addColorStop(0, isLeft ? '#c4b5fd' : '#55e8ff');
       gradient.addColorStop(1, glowColor);
       ctx.strokeStyle = gradient;
       ctx.beginPath();
@@ -650,37 +745,39 @@ export class HandTracker {
         ctx.stroke();
       } else {
         ctx.arc(x, y, isWrist ? 6 : 3.2, 0, Math.PI * 2);
-        ctx.fillStyle = isWrist ? '#55e8ff' : '#74f6c7';
+        ctx.fillStyle = isWrist ? (isLeft ? '#c4b5fd' : '#55e8ff') : '#74f6c7';
         ctx.fill();
       }
     });
 
-    const palmCenter = {
-      x: ((landmarks[0].x + landmarks[5].x + landmarks[17].x) / 3) * width,
-      y: ((landmarks[0].y + landmarks[5].y + landmarks[17].y) / 3) * height
-    };
-    const radius = 15 + openness * 12 + Math.sin(this.pulse) * 1.5;
-    ctx.beginPath();
-    ctx.arc(palmCenter.x, palmCenter.y, radius, 0, Math.PI * 2);
-    ctx.strokeStyle = glowColor;
-    ctx.lineWidth = 1.8;
-    ctx.setLineDash([4, 4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    if (!isLeft) {
+      const palmCenter = {
+        x: ((landmarks[0].x + landmarks[5].x + landmarks[17].x) / 3) * width,
+        y: ((landmarks[0].y + landmarks[5].y + landmarks[17].y) / 3) * height
+      };
+      const radius = 15 + openness * 12 + Math.sin(this.pulse) * 1.5;
+      ctx.beginPath();
+      ctx.arc(palmCenter.x, palmCenter.y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = glowColor;
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-    const pointerLength = radius + 12;
-    const pointerX = palmCenter.x + Math.sin(rotation.roll) * pointerLength;
-    const pointerY = palmCenter.y - Math.cos(rotation.roll) * pointerLength;
-    ctx.beginPath();
-    ctx.moveTo(palmCenter.x, palmCenter.y);
-    ctx.lineTo(pointerX, pointerY);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(pointerX, pointerY, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#55e8ff';
-    ctx.fill();
+      const pointerLength = radius + 12;
+      const pointerX = palmCenter.x + Math.sin(rotation.roll) * pointerLength;
+      const pointerY = palmCenter.y - Math.cos(rotation.roll) * pointerLength;
+      ctx.beginPath();
+      ctx.moveTo(palmCenter.x, palmCenter.y);
+      ctx.lineTo(pointerX, pointerY);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(pointerX, pointerY, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#55e8ff';
+      ctx.fill();
+    }
     ctx.restore();
   }
 
