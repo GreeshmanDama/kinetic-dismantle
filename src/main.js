@@ -66,28 +66,28 @@ let lastFrameTime = performance.now();
 let customModelUrl = "";
 
 // ============================================================
-// EXISTING GLB MODELS
+// BUILT-IN GLB MODELS — SUPABASE STORAGE
 // ============================================================
 
 const GLB_MODELS = {
   car: {
-    url: "/models/porche.glb",
+    url: "https://jkyxrprhdanrplhbufof.supabase.co/storage/v1/object/public/GLB/porche.glb",
     name: "CUSTOM SUPERCAR",
   },
 
   airplane: {
-    url: "/models/robo_dog.glb",
-    name: "CUSTOM ROBOT DOG",
+    url: "https://jkyxrprhdanrplhbufof.supabase.co/storage/v1/object/public/GLB/gun.glb",
+    name: "CUSTOM GUN",
   },
 
   bike: {
-    url: "/models/human_heart.glb",
-    name: "CUSTOM HEART",
+    url: "https://jkyxrprhdanrplhbufof.supabase.co/storage/v1/object/public/GLB/human_heart.glb",
+    name: "HUMAN HEART",
   },
 
   drone: {
-    url: "/models/korean_building.glb",
-    name: "CUSTOM BUILDING",
+    url: "https://jkyxrprhdanrplhbufof.supabase.co/storage/v1/object/public/GLB/korean_building.glb",
+    name: "KOREAN BUILDING",
   },
 };
 
@@ -330,7 +330,9 @@ function handleHandTrackingUpdate(data) {
     if (data.rightGesture === "OPEN HAND") gestureBadge.classList.add("open");
     if (data.rightGesture === "CLOSED FIST") gestureBadge.classList.add("fist");
     if (data.leftGesture === "PINCH GRAB") gestureBadge.classList.add("open");
-    statFingers.textContent = data.rightGesture ? `${data.fingersCount}/5` : "—";
+    statFingers.textContent = data.rightGesture
+      ? `${data.fingersCount}/5`
+      : "—";
     statDist.textContent =
       data.rightGesture && data.rotation ? `${data.rotation.rollDeg}°` : "—";
   } else {
