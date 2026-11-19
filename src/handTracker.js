@@ -182,7 +182,7 @@ export class HandTracker {
         this.video.srcObject = null;
         this.hands = null;
         if (handsInstance?.close) {
-          try { await handsInstance.close(); } catch {}
+          try { await handsInstance.close(); } catch { }
         }
         this.clearCanvas();
         this.reportStatus('error', error);
@@ -260,7 +260,7 @@ export class HandTracker {
       const onEnded = this.trackEndHandlers.get(track);
       if (onEnded) track.removeEventListener('ended', onEnded);
       this.trackEndHandlers.delete(track);
-      try { track.stop(); } catch {}
+      try { track.stop(); } catch { }
     });
   }
 

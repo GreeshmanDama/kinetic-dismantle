@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getModelBlobUrl } from "./modelCache.js";
 
 /**
  * Helper to create materials with PBR properties
@@ -1520,18 +1521,43 @@ export function processCustomGLTF(gltfScene) {
 }
 
 /**
- * Load an existing GLB/GLTF from the public folder.
- *
- * Example:
- * loadGLBModel('/models/car.glb')
+ * Shared loaders cache to prevent re-instantiating loaders repeatedly
  */
-export async function loadGLBModel(url) {
+let sharedGLTFLoader = null;
+
+async function getGLTFLoader() {
+  if (sharedGLTFLoader) return sharedGLTFLoader;
   const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+  const { DRACOLoader } = await import("three/addons/loaders/DRACOLoader.js");
 
   const loader = new GLTFLoader();
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.7/");
+  loader.setDRACOLoader(dracoLoader);
+  sharedGLTFLoader = loader;
+  return sharedGLTFLoader;
+}
+
+/**
+ * Load a GLB/GLTF model using the high-performance local cache
+ */
+export async function loadGLBModel(url, onProgress) {
+  const [loader, blobUrl] = await Promise.all([
+    getGLTFLoader(),
+    getModelBlobUrl(url, onProgress),
+  ]);
 
   const gltf = await new Promise((resolve, reject) => {
-    loader.load(url, resolve, undefined, reject);
+    loader.load(
+      blobUrl,
+      resolve,
+      (event) => {
+        if (event.lengthComputable && onProgress) {
+          onProgress(event.loaded / event.total);
+        }
+      },
+      reject,
+    );
   });
 
   if (!gltf?.scene) {

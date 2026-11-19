@@ -1,30 +1,30 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0b1522" />
-    <meta
-      name="description"
-      content="A real-time hand-tracking 3D exploded-view studio powered by Three.js and MediaPipe."
-    />
-    <title>Kinetic Dismantle — 3D Interaction Studio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="style.css" />
 
-    <!-- MediaPipe Hands. The application owns its own video-frame loop. -->
-    <script
-      src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
-      crossorigin="anonymous"
-    ></script>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1522" />
+  <meta name="description"
+    content="A real-time hand-tracking 3D exploded-view studio powered by Three.js and MediaPipe." />
+  <title>Kinetic Dismantle — 3D Interaction Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://jkyxrprhdanrplhbufof.supabase.co" crossorigin />
+  <link rel="dns-prefetch" href="https://jkyxrprhdanrplhbufof.supabase.co" />
+  <link rel="preload" as="fetch" crossorigin="anonymous"
+    href="https://jkyxrprhdanrplhbufof.supabase.co/storage/v1/object/public/GLB/porche.glb" />
 
-    <!-- Three.js import map -->
-    <script type="importmap">
+  <!-- MediaPipe Hands. The application owns its own video-frame loop. -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <!-- Three.js import map -->
+  <script type="importmap">
       {
         "imports": {
           "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
@@ -32,322 +32,329 @@
         }
       }
     </script>
-  </head>
+</head>
 
-  <body>
-    <div id="canvas-container" aria-label="3D model stage"></div>
-    <div id="labels-container" aria-live="polite"></div>
+<body>
+  <!-- Real-time model loading progress line -->
+  <div id="model-loading-bar" class="model-loading-bar" aria-hidden="true">
+    <div id="model-loading-fill" class="model-loading-fill"></div>
+  </div>
 
-    <header class="hud-header">
-      <a class="hud-brand" href="#" aria-label="Kinetic Dismantle home">
-        <span class="brand-icon" aria-hidden="true">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.7"
-          >
-            <path d="m12 2 9 5-9 5-9-5 9-5Z" />
-            <path d="m3 12 9 5 9-5M3 17l9 5 9-5" />
-          </svg>
-        </span>
-        <span class="brand-copy">
-          <span class="brand-title">KINETIC <b>DISMANTLE</b></span>
-          <span class="brand-subtitle">INTERACTIVE 3D ASSEMBLY STUDIO</span>
-        </span>
-      </a>
+  <div id="canvas-container" aria-label="3D model stage"></div>
+  <div id="labels-container" aria-live="polite"></div>
 
-      <nav class="model-selector" aria-label="Choose a 3D model">
-        <button type="button" class="model-btn active" data-model="car">
-          <span class="btn-icon"></span><span class="btn-text">Supercar</span>
-        </button>
-        <button type="button" class="model-btn" data-model="airplane">
-          <span class="btn-icon"></span
-          ><span class="btn-text">Gun</span>
-        </button>
-        <button type="button" class="model-btn" data-model="bike">
-          <span class="btn-icon"></span
-          ><span class="btn-text">Human Heart</span>
-        </button>
-        <button type="button" class="model-btn" data-model="drone">
-          <span class="btn-icon"></span
-          ><span class="btn-text">Korean Building</span>
-        </button>
-        <label
-          class="model-btn upload-btn"
-          title="Import a .glb or .gltf model"
-        >
-          <span class="btn-icon">＋</span><span class="btn-text">Import</span>
-          <input type="file" id="glb-file-input" accept=".glb,.gltf" />
-        </label>
-      </nav>
+  <header class="hud-header">
+    <a class="hud-brand" href="#" aria-label="Kinetic Dismantle home">
+      <span class="brand-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="m12 2 9 5-9 5-9-5 9-5Z" />
+          <path d="m3 12 9 5 9-5M3 17l9 5 9-5" />
+        </svg>
+      </span>
+      <span class="brand-copy">
+        <span class="brand-title">KINETIC <b>DISMANTLE</b></span>
+        <span class="brand-subtitle">INTERACTIVE 3D ASSEMBLY STUDIO</span>
+      </span>
+    </a>
 
-      <div class="hud-actions" aria-label="Display settings">
-        <button
-          type="button"
-          id="btn-sound"
-          class="icon-btn active"
-          title="Toggle sound effects"
-          aria-label="Toggle sound"
-        >
-          <span id="sound-icon">♫</span>
-        </button>
-        <button
-          type="button"
-          id="btn-labels"
-          class="icon-btn active"
-          title="Toggle component labels"
-          aria-label="Toggle labels"
-        >
-          <span>⌗</span>
-        </button>
-        <button
-          type="button"
-          id="btn-theme"
-          class="icon-btn"
-          title="Toggle studio theme"
-          aria-label="Toggle theme"
-        >
-          <span>◐</span>
-        </button>
-        <button
-          type="button"
-          id="btn-fullscreen"
-          class="icon-btn"
-          title="Toggle fullscreen"
-          aria-label="Toggle fullscreen"
-        >
-          <span>⛶</span>
-        </button>
-      </div>
-    </header>
-
-    <aside class="hud-panel hud-left" aria-label="Model controls">
-      <section class="panel-card telemetry-card">
-        <div class="card-header">
-          <div>
-            <span class="eyebrow">LIVE SYSTEM</span>
-            <h2>Model telemetry</h2>
-          </div>
-          <span class="live-status"><i class="live-dot"></i> READY</span>
-        </div>
-
-        <div class="telemetry-grid">
-          <div class="telemetry-item">
-            <span class="tel-label">ACTIVE MODEL</span>
-            <strong class="tel-val" id="model-name-val">CYBER APEX V8</strong>
-          </div>
-          <div class="telemetry-item">
-            <span class="tel-label">COMPONENTS</span>
-            <strong class="tel-val" id="part-count-val">14 PARTS</strong>
-          </div>
-          <div class="telemetry-item full-width">
-            <span class="tel-label">ASSEMBLY STATE</span>
-            <strong class="tel-val state-assembled" id="dismantle-state-val"
-              >ASSEMBLED</strong
-            >
-          </div>
-        </div>
-
-        <div class="expansion-block">
-          <div class="gauge-header">
-            <span class="tel-label">SEPARATION</span>
-            <strong id="openness-percentage">0%</strong>
-          </div>
-          <div class="gauge-track">
-            <div
-              class="gauge-bar"
-              id="openness-bar"
-              role="progressbar"
-              aria-label="Model separation"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow="0"
-            ></div>
-          </div>
-        </div>
-
-        <div class="manual-control-group">
-          <div class="control-row">
-            <label for="manual-slider">MANUAL CONTROL</label>
-            <span id="slider-val">0%</span>
-          </div>
-          <input
-            type="range"
-            id="manual-slider"
-            min="0"
-            max="100"
-            value="0"
-            step="1"
-          />
-          <div class="control-hints">
-            <span>Closed fist</span><span>Open palm</span>
-          </div>
-        </div>
-
-        <div class="control-setting">
-          <span class="tel-label">SEPARATION DISTANCE</span>
-          <div
-            class="spread-controls"
-            role="group"
-            aria-label="Separation distance"
-          >
-            <button type="button" class="chip-btn active" data-spread="1.0">
-              1.0×
-            </button>
-            <button type="button" class="chip-btn" data-spread="1.6">
-              1.6×
-            </button>
-            <button type="button" class="chip-btn" data-spread="2.2">
-              2.2×
-            </button>
-          </div>
-        </div>
-
-        <div class="switch-row">
-          <label for="labels-toggle">Component labels</label>
-          <label class="toggle-switch">
-            <input type="checkbox" id="labels-toggle" checked />
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="switch-row">
-          <label for="auto-rotate-toggle">Auto-rotate model</label>
-          <label class="toggle-switch">
-            <input type="checkbox" id="auto-rotate-toggle" checked />
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-      </section>
-    </aside>
-
-    <aside class="hud-panel hud-right" aria-label="Hand tracker and components">
-      <section class="panel-card webcam-card">
-        <div class="card-header">
-          <div>
-            <span class="eyebrow">MOTION INPUT</span>
-            <h2>Hand tracking</h2>
-          </div>
-          <div class="camera-indicator" id="cam-status-pill">
-            <span class="cam-dot"></span
-            ><span id="cam-status-text">OFFLINE</span>
-          </div>
-        </div>
-
-        <div class="tracking-viewport mirrored" id="tracking-viewport">
-          <video id="webcam-video" playsinline muted autoplay></video>
-          <canvas id="hand-canvas"></canvas>
-          <div class="reticle-overlay" id="reticle-overlay" aria-hidden="true">
-            <span class="reticle-corner top-left"></span>
-            <span class="reticle-corner top-right"></span>
-            <span class="reticle-corner bottom-left"></span>
-            <span class="reticle-corner bottom-right"></span>
-            <span class="gesture-badge" id="detected-gesture-badge"
-              >NO HAND</span
-            >
-          </div>
-          <div class="webcam-placeholder" id="webcam-placeholder">
-            <span class="placeholder-icon">◎</span>
-            <strong>Camera is on standby</strong>
-            <small
-              >Enable the camera to control the model with your hand.</small
-            >
-            <button type="button" id="btn-start-camera" class="primary-btn">
-              <span>START TRACKING</span><span>→</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="card-footer">
-          <button type="button" id="btn-toggle-cam" class="action-btn">
-            <span id="toggle-cam-icon">▶</span
-            ><span id="toggle-cam-text">Start camera</span>
-          </button>
-          <button
-            type="button"
-            id="btn-mirror-cam"
-            class="icon-btn active"
-            title="Mirror camera feed"
-            aria-label="Mirror camera"
-          >
-            ⇋
-          </button>
-          <button
-            type="button"
-            id="btn-expand-cam"
-            class="icon-btn"
-            title="Expand camera preview"
-            aria-label="Expand camera"
-          >
-            ⤢
-          </button>
-        </div>
-
-        <div class="tracking-stats">
-          <div class="stat-pill">
-            <span class="label">FINGERS</span
-            ><strong class="value" id="stat-fingers">0/5</strong>
-          </div>
-          <div class="stat-pill">
-            <span class="label">HAND TILT</span
-            ><strong class="value" id="stat-dist">—</strong>
-          </div>
-          <div class="stat-pill">
-            <span class="label">TRACKING FPS</span
-            ><strong class="value" id="stat-fps">0</strong>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel-card inspector-card" id="inspector-card">
-        <div class="card-header">
-          <div>
-            <span class="eyebrow">MODEL BREAKDOWN</span>
-            <h2>Components</h2>
-          </div>
-          <span class="inspector-hint">SELECT TO FOCUS</span>
-        </div>
-        <div id="model-notice" class="model-notice" hidden></div>
-        <div class="part-list" id="part-list">
-          <p class="empty-parts">Loading components…</p>
-        </div>
-      </section>
-    </aside>
-
-    <nav class="hud-bottom-dock" aria-label="Camera views">
-      <div class="dock-label">VIEW</div>
-      <div class="view-preset-group">
-        <button type="button" class="view-btn active" data-view="isometric">
-          Iso
-        </button>
-        <button type="button" class="view-btn" data-view="front">Front</button>
-        <button type="button" class="view-btn" data-view="top">Top</button>
-        <button type="button" class="view-btn" data-view="side">Side</button>
-        <span class="dock-divider"></span>
-        <button type="button" class="view-btn view-explode" data-view="explode">
-          Explode max
-        </button>
-        <button type="button" class="view-btn" data-view="reset">
-          Reset view
-        </button>
-        <span class="dock-divider"></span>
-        <button
-          type="button"
-          id="btn-mouse-mode"
-          class="view-btn"
-          title="Switch Left Click: Orbit Rotate or Drag"
-        >
-          <span class="btn-mode-icon">↻</span> Orbit rotate
-        </button>
-      </div>
+    <nav class="model-selector" aria-label="Choose a 3D model">
+      <button type="button" class="model-btn active" data-model="car">
+        <span class="btn-icon"></span><span class="btn-text">Supercar</span>
+      </button>
+      <button type="button" class="model-btn" data-model="airplane">
+        <span class="btn-icon"></span><span class="btn-text">Gun</span>
+      </button>
+      <button type="button" class="model-btn" data-model="bike">
+        <span class="btn-icon"></span><span class="btn-text">Human Heart</span>
+      </button>
+      <button type="button" class="model-btn" data-model="drone">
+        <span class="btn-icon"></span><span class="btn-text">Korean Building</span>
+      </button>
+      <label class="model-btn upload-btn" title="Import a .glb or .gltf model">
+        <span class="btn-icon">＋</span><span class="btn-text">Import</span>
+        <input type="file" id="glb-file-input" accept=".glb,.gltf" />
+      </label>
     </nav>
 
-    <div
-      id="toast-notification"
-      class="toast"
-      role="status"
-      aria-live="polite"
-    ></div>
-    <script type="module" src="src/main.js"></script>
-  </body>
+    <div class="hud-actions" aria-label="Display settings">
+      <button type="button" id="btn-auto-rotate-quick" class="icon-btn active" title="Toggle model auto-rotation"
+        aria-label="Toggle auto-rotation">
+        <span id="rotate-icon">↻</span>
+      </button>
+      <button type="button" id="btn-sound" class="icon-btn active" title="Toggle music and sound effects"
+        aria-label="Toggle sound">
+        <span id="sound-icon">♫</span>
+      </button>
+      <button type="button" id="btn-labels" class="icon-btn active" title="Toggle component labels"
+        aria-label="Toggle labels">
+        <span>⌗</span>
+      </button>
+      <button type="button" id="btn-theme" class="icon-btn" title="Toggle studio theme" aria-label="Toggle theme">
+        <span>◐</span>
+      </button>
+      <button type="button" id="btn-fullscreen" class="icon-btn" title="Toggle fullscreen"
+        aria-label="Toggle fullscreen">
+        <span>⛶</span>
+      </button>
+    </div>
+
+    <!-- Mobile-only Control Mode Switcher -->
+    <!-- <div class="mobile-mode-bar" id="mobile-mode-bar">
+      <div class="control-mode-pill" id="control-mode-pill" role="tablist" aria-label="Mobile interaction mode">
+        <button type="button" class="mode-tab active" id="mode-btn-manual" data-mode="manual" role="tab"
+          aria-selected="true" title="Manual control via touch/slider">
+          <span class="mode-tab-icon">🕹️</span>
+          <span class="mode-tab-label">Manual</span>
+        </button>
+        <button type="button" class="mode-tab" id="mode-btn-hand" data-mode="hand" role="tab" aria-selected="false"
+          title="Hand tracking via camera">
+          <span class="mode-tab-icon">✋</span>
+          <span class="mode-tab-label">Hand tracking</span>
+        </button>
+      </div>
+    </div> -->
+  </header>
+
+  <aside class="hud-panel hud-left" aria-label="Model controls">
+    <section class="panel-card telemetry-card">
+      <div class="card-header">
+        <div>
+          <span class="eyebrow">LIVE SYSTEM</span>
+          <h2>Model telemetry</h2>
+        </div>
+        <span class="live-status"><i class="live-dot"></i> READY</span>
+      </div>
+
+      <div class="telemetry-grid">
+        <div class="telemetry-item">
+          <span class="tel-label">ACTIVE MODEL</span>
+          <strong class="tel-val" id="model-name-val">CYBER APEX V8</strong>
+        </div>
+        <div class="telemetry-item">
+          <span class="tel-label">COMPONENTS</span>
+          <strong class="tel-val" id="part-count-val">14 PARTS</strong>
+        </div>
+        <div class="telemetry-item full-width">
+          <span class="tel-label">ASSEMBLY STATE</span>
+          <strong class="tel-val state-assembled" id="dismantle-state-val">ASSEMBLED</strong>
+        </div>
+      </div>
+
+      <div class="expansion-block">
+        <div class="gauge-header">
+          <span class="tel-label">SEPARATION</span>
+          <strong id="openness-percentage">0%</strong>
+        </div>
+        <div class="gauge-track">
+          <div class="gauge-bar" id="openness-bar" role="progressbar" aria-label="Model separation" aria-valuemin="0"
+            aria-valuemax="100" aria-valuenow="0"></div>
+        </div>
+      </div>
+
+      <div class="manual-control-group">
+        <div class="control-row">
+          <label for="manual-slider">MANUAL CONTROL</label>
+          <span id="slider-val">0%</span>
+        </div>
+        <input type="range" id="manual-slider" min="0" max="100" value="0" step="1" />
+        <div class="control-hints">
+          <span>Closed fist</span><span>Open palm</span>
+        </div>
+      </div>
+
+      <div class="control-setting">
+        <span class="tel-label">SEPARATION DISTANCE</span>
+        <div class="spread-controls" role="group" aria-label="Separation distance">
+          <button type="button" class="chip-btn active" data-spread="1.0">
+            1.0×
+          </button>
+          <button type="button" class="chip-btn" data-spread="1.6">
+            1.6×
+          </button>
+          <button type="button" class="chip-btn" data-spread="2.2">
+            2.2×
+          </button>
+        </div>
+      </div>
+
+      <div class="switch-row">
+        <label for="labels-toggle">Component labels</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="labels-toggle" checked />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+      <div class="switch-row">
+        <label for="auto-rotate-toggle">Auto-rotate model</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="auto-rotate-toggle" checked />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+    </section>
+  </aside>
+
+  <aside class="hud-panel hud-right" id="hud-right-panel" aria-label="Hand tracker and components">
+    <section class="panel-card webcam-card" id="webcam-card">
+      <div class="card-header">
+        <div>
+          <span class="eyebrow">MOTION INPUT</span>
+          <h2>Hand tracking</h2>
+        </div>
+        <div class="camera-indicator" id="cam-status-pill">
+          <span class="cam-dot"></span><span id="cam-status-text">OFFLINE</span>
+        </div>
+      </div>
+
+      <div class="tracking-viewport mirrored" id="tracking-viewport">
+        <video id="webcam-video" playsinline muted autoplay></video>
+        <canvas id="hand-canvas"></canvas>
+        <div class="reticle-overlay" id="reticle-overlay" aria-hidden="true">
+          <span class="reticle-corner top-left"></span>
+          <span class="reticle-corner top-right"></span>
+          <span class="reticle-corner bottom-left"></span>
+          <span class="reticle-corner bottom-right"></span>
+          <span class="gesture-badge" id="detected-gesture-badge">NO HAND</span>
+        </div>
+        <div class="webcam-placeholder" id="webcam-placeholder">
+          <span class="placeholder-icon">◎</span>
+          <strong>Camera is on standby</strong>
+          <small>Enable the camera to control the model with your hand.</small>
+          <button type="button" id="btn-start-camera" class="primary-btn">
+            <span>START TRACKING</span><span>→</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <button type="button" id="btn-toggle-cam" class="action-btn">
+          <span id="toggle-cam-icon">▶</span><span id="toggle-cam-text">Start camera</span>
+        </button>
+        <button type="button" id="btn-mirror-cam" class="icon-btn active" title="Mirror camera feed"
+          aria-label="Mirror camera">
+          ⇋
+        </button>
+        <button type="button" id="btn-expand-cam" class="icon-btn" title="Expand camera preview"
+          aria-label="Expand camera">
+          ⤢
+        </button>
+      </div>
+
+      <div class="tracking-stats">
+        <div class="stat-pill">
+          <span class="label">FINGERS</span><strong class="value" id="stat-fingers">0/5</strong>
+        </div>
+        <div class="stat-pill">
+          <span class="label">HAND TILT</span><strong class="value" id="stat-dist">—</strong>
+        </div>
+        <div class="stat-pill">
+          <span class="label">TRACKING FPS</span><strong class="value" id="stat-fps">0</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel-card inspector-card" id="inspector-card">
+      <div class="card-header">
+        <div>
+          <span class="eyebrow">MODEL BREAKDOWN</span>
+          <h2>Components</h2>
+        </div>
+        <span class="inspector-hint">SELECT TO FOCUS</span>
+      </div>
+      <div id="model-notice" class="model-notice" hidden></div>
+      <div class="part-list" id="part-list">
+        <p class="empty-parts">Loading components…</p>
+      </div>
+    </section>
+  </aside>
+
+  <nav class="hud-bottom-dock" aria-label="Camera views">
+    <div class="dock-label">VIEW</div>
+    <div class="view-preset-group">
+      <button type="button" class="view-btn active" data-view="isometric">
+        Iso
+      </button>
+      <button type="button" class="view-btn" data-view="front">Front</button>
+      <button type="button" class="view-btn" data-view="top">Top</button>
+      <button type="button" class="view-btn" data-view="side">Side</button>
+      <span class="dock-divider"></span>
+      <button type="button" class="view-btn view-explode" data-view="explode">
+        Explode max
+      </button>
+      <button type="button" class="view-btn" data-view="reset">
+        Reset view
+      </button>
+      <span class="dock-divider"></span>
+      <button type="button" id="btn-mouse-mode" class="view-btn" title="Switch Left Click: Orbit Rotate or Drag">
+        <span class="btn-mode-icon">↻</span> Orbit rotate
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile floating control station -->
+  <section id="mobile-control-bar" class="mobile-control-bar" aria-label="Mobile controls">
+    <div class="mobile-slider-group">
+      <div class="mobile-slider-header">
+        <div class="mobile-status-tag">
+          <span class="mobile-tag-label">DISMANTLE</span>
+          <strong id="mobile-percentage-text">0%</strong>
+        </div>
+        <div class="mobile-snap-actions">
+          <button type="button" class="mobile-snap-btn active" id="mobile-snap-0">0%</button>
+          <button type="button" class="mobile-snap-btn" id="mobile-snap-50">50%</button>
+          <button type="button" class="mobile-snap-btn" id="mobile-snap-100">100%</button>
+        </div>
+      </div>
+      <div class="mobile-slider-track-wrap">
+        <input type="range" id="mobile-manual-slider" min="0" max="100" value="0" step="1"
+          aria-label="Dismantle progress" />
+      </div>
+    </div>
+
+    <div class="mobile-bottom-row">
+      <div class="mobile-spread-chips" role="group" aria-label="Separation distance">
+        <button type="button" class="mobile-chip active" data-spread="1.0">1.0×</button>
+        <button type="button" class="mobile-chip" data-spread="1.6">1.6×</button>
+        <button type="button" class="mobile-chip" data-spread="2.2">2.2×</button>
+      </div>
+      <div class="mobile-row-actions">
+        <button type="button" class="mobile-action-pill" id="btn-mobile-views" aria-label="View camera presets">
+          <span>📷 Views</span>
+        </button>
+        <button type="button" class="mobile-action-pill highlight" id="btn-mobile-parts"
+          aria-label="Open components list">
+          <span>🔍 Parts <b id="mobile-parts-count">(14)</b></span>
+        </button>
+      </div>
+    </div>
+
+    <div id="mobile-views-menu" class="mobile-views-menu" hidden>
+      <button type="button" class="view-btn active" data-view="isometric">Iso</button>
+      <button type="button" class="view-btn" data-view="front">Front</button>
+      <button type="button" class="view-btn" data-view="top">Top</button>
+      <button type="button" class="view-btn" data-view="side">Side</button>
+      <button type="button" class="view-btn" data-view="reset">Reset</button>
+    </div>
+  </section>
+
+  <!-- Mobile slide-up components drawer -->
+  <div id="mobile-parts-drawer" class="mobile-parts-drawer" hidden>
+    <div class="mobile-drawer-backdrop" id="mobile-drawer-backdrop"></div>
+    <div class="mobile-drawer-content">
+      <div class="mobile-drawer-handle"></div>
+      <div class="mobile-drawer-header">
+        <div>
+          <span class="eyebrow">MODEL BREAKDOWN</span>
+          <h3>Components (<span id="mobile-drawer-count">0</span>)</h3>
+        </div>
+        <button type="button" id="btn-close-parts-drawer" class="icon-btn" aria-label="Close parts list">✕</button>
+      </div>
+      <div class="mobile-drawer-list" id="mobile-drawer-list"></div>
+    </div>
+  </div>
+
+  <div id="toast-notification" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="src/main.js"></script>
+</body>
+
 </html>

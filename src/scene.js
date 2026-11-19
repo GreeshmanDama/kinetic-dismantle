@@ -86,7 +86,7 @@ export class SceneManager {
       RIGHT: THREE.MOUSE.PAN,
     };
     this.controls.touches = {
-      ONE: THREE.TOUCH.PAN,
+      ONE: THREE.TOUCH.ROTATE,
       TWO: THREE.TOUCH.DOLLY_PAN,
     };
     this.controls.addEventListener("start", () => {
@@ -113,6 +113,13 @@ export class SceneManager {
     this.zoomStartHandDistance = 0;
     this.zoomStartCamDistance = 0;
     this.zoomTargetDistance = null;
+
+    // Focused part pointing state
+    this.focusedPart = null;
+    this.focusedCard = null;
+    this.onPartClicked = null;
+    this.onCanvasEmptyClick = null;
+
     this._offsetVec = new THREE.Vector3();
     this._pivotA = new THREE.Vector3();
     this._pivotB = new THREE.Vector3();
@@ -122,10 +129,64 @@ export class SceneManager {
     this._partDepthVector = new THREE.Vector3();
 
     this._setupPointerOverlay();
+    this._setupCanvasTapDetection();
 
     this.resizeObserver = new ResizeObserver(() => this.onWindowResize());
     this.resizeObserver.observe(container);
     window.addEventListener("resize", this.onWindowResize);
+  }
+
+  _setupCanvasTapDetection() {
+    let tapStartX = 0;
+    let tapStartY = 0;
+    let tapStartTime = 0;
+
+    this.renderer.domElement.addEventListener("pointerdown", (e) => {
+      tapStartX = e.clientX;
+      tapStartY = e.clientY;
+      tapStartTime = performance.now();
+    });
+
+    this.renderer.domElement.addEventListener("pointerup", (e) => {
+      const dist = Math.hypot(e.clientX - tapStartX, e.clientY - tapStartY);
+      const duration = performance.now() - tapStartTime;
+      if (dist < 8 && duration < 380) {
+        this._handleCanvasTap(e.clientX, e.clientY);
+      }
+    });
+  }
+
+  _handleCanvasTap(clientX, clientY) {
+    if (!this.currentParts.length) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    this.partPointerNdc.set(x, y);
+    this.camera.updateMatrixWorld();
+    this.currentModelRoot?.updateMatrixWorld(true);
+    this.partRaycaster.setFromCamera(this.partPointerNdc, this.camera);
+
+    const roots = this.currentParts
+      .map((part) => part.object)
+      .filter((object) => object && object.visible);
+
+    if (roots.length) {
+      const hits = this.partRaycaster.intersectObjects(roots, true);
+      for (const hit of hits) {
+        let node = hit.object;
+        while (node) {
+          const part = this.currentParts.find((candidate) => candidate.object === node);
+          if (part) {
+            this.onPartClicked?.(part);
+            return;
+          }
+          node = node.parent;
+        }
+      }
+    }
+
+    this.onCanvasEmptyClick?.();
   }
 
   setHandPointer(pointer) {
@@ -406,6 +467,28 @@ export class SceneManager {
     line.style.display = "none";
     svg.appendChild(line);
 
+    // Leader path for focused component selection
+    const leaderPath = document.createElementNS(svgNS, "path");
+    leaderPath.setAttribute("fill", "none");
+    leaderPath.setAttribute("stroke", "#00d2ff");
+    leaderPath.setAttribute("stroke-width", "2");
+    leaderPath.setAttribute("stroke-dasharray", "6 3");
+    leaderPath.setAttribute("class", "pointer-leader-path");
+    leaderPath.style.display = "none";
+    leaderPath.style.filter = "drop-shadow(0 0 6px rgba(0, 210, 255, 0.85))";
+
+    const startCircle = document.createElementNS(svgNS, "circle");
+    startCircle.setAttribute("r", "4");
+    startCircle.setAttribute("fill", "#00d2ff");
+    startCircle.style.display = "none";
+
+    const endCircle = document.createElementNS(svgNS, "circle");
+    endCircle.setAttribute("r", "4");
+    endCircle.setAttribute("fill", "#ffffff");
+    endCircle.style.display = "none";
+
+    svg.append(leaderPath, startCircle, endCircle);
+
     const cursor = document.createElement("div");
     cursor.style.cssText =
       "position:absolute;left:0;top:0;width:34px;height:34px;box-sizing:border-box;" +
@@ -437,12 +520,39 @@ export class SceneManager {
       "display:block;font-size:9px;opacity:.7;letter-spacing:.14em;";
     label.append(nameEl, stateEl);
 
-    root.append(svg, ring, label, cursor);
+    // High-tech target beacon attached to 3D focused part
+    const targetBeacon = document.createElement("div");
+    targetBeacon.className = "target-beacon";
+    targetBeacon.style.cssText =
+      "position:absolute;left:0;top:0;display:none;pointer-events:none;will-change:transform;z-index:7;";
+    targetBeacon.innerHTML = `
+      <div class="beacon-reticle">
+        <span class="beacon-corner tl"></span>
+        <span class="beacon-corner tr"></span>
+        <span class="beacon-corner bl"></span>
+        <span class="beacon-corner br"></span>
+        <span class="beacon-center-dot"></span>
+        <span class="beacon-ring-pulse"></span>
+      </div>
+      <div class="beacon-hud-card">
+        <span class="beacon-tag-icon">⌖</span>
+        <div class="beacon-text-group">
+          <strong class="beacon-part-title">COMPONENT</strong>
+          <small class="beacon-part-category">DETACHABLE</small>
+        </div>
+      </div>
+    `;
+
+    root.append(svg, ring, label, cursor, targetBeacon);
     this.container.appendChild(root);
 
     this.overlay = {
       root,
       line,
+      leaderPath,
+      startCircle,
+      endCircle,
+      targetBeacon,
       cursor,
       ring,
       label,
@@ -833,16 +943,159 @@ export class SceneManager {
     this.isTransitioningCamera = true;
   }
 
-  focusOnPart(part) {
+  focusOnPart(part, card = null) {
+    if (!part) {
+      this.clearFocusedPart();
+      return;
+    }
+    this.focusedPart = part;
+    this.focusedCard = card;
+
     const worldPosition = new THREE.Vector3();
-    part.object.getWorldPosition(worldPosition);
+    part.object.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(part.object);
+    if (!box.isEmpty()) {
+      box.getCenter(worldPosition);
+    } else {
+      part.object.getWorldPosition(worldPosition);
+    }
+
     this.zoomTargetDistance = null;
     this.targetControlsTarget.copy(worldPosition);
     const direction = new THREE.Vector3(1.1, 0.72, 1.45).normalize();
     this.targetCamPos
       .copy(worldPosition)
-      .addScaledVector(direction, Math.max(this.modelRadius * 1.45, 4));
+      .addScaledVector(direction, Math.max(this.modelRadius * 1.35, 3.8));
     this.isTransitioningCamera = true;
+
+    this._pulsePartMesh(part);
+  }
+
+  clearFocusedPart() {
+    this.focusedPart = null;
+    this.focusedCard = null;
+    if (this.overlay) {
+      this.overlay.leaderPath.style.display = "none";
+      this.overlay.startCircle.style.display = "none";
+      this.overlay.endCircle.style.display = "none";
+      this.overlay.targetBeacon.style.display = "none";
+    }
+  }
+
+  _pulsePartMesh(part) {
+    if (!part?.object) return;
+    const meshes = [];
+    part.object.traverse((child) => {
+      if (child.isMesh && child.material) {
+        meshes.push(child);
+      }
+    });
+
+    meshes.forEach((mesh) => {
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((mat) => {
+        if ("emissive" in mat && !mat._origEmissive) {
+          mat._origEmissive = mat.emissive.getHex();
+          mat._origIntensity = mat.emissiveIntensity || 0;
+          mat.emissive.setHex(0x00f0ff);
+          mat.emissiveIntensity = 1.4;
+          setTimeout(() => {
+            mat.emissive.setHex(mat._origEmissive);
+            mat.emissiveIntensity = mat._origIntensity;
+            delete mat._origEmissive;
+            delete mat._origIntensity;
+          }, 850);
+        }
+      });
+    });
+  }
+
+  _updateFocusedPartLeaderLine() {
+    const o = this.overlay;
+    if (!o) return;
+    if (!this.focusedPart || !this.focusedPart.object) {
+      o.leaderPath.style.display = "none";
+      o.startCircle.style.display = "none";
+      o.endCircle.style.display = "none";
+      o.targetBeacon.style.display = "none";
+      return;
+    }
+
+    this.currentModelRoot?.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+
+    const worldPos = new THREE.Vector3();
+    const box = new THREE.Box3().setFromObject(this.focusedPart.object);
+    if (!box.isEmpty()) {
+      box.getCenter(worldPos);
+    } else {
+      this.focusedPart.object.getWorldPosition(worldPos);
+    }
+
+    const cameraForward = this.camera.getWorldDirection(new THREE.Vector3());
+    const depth = worldPos.clone().sub(this.camera.position).dot(cameraForward);
+    if (depth <= 0) {
+      o.leaderPath.style.display = "none";
+      o.startCircle.style.display = "none";
+      o.endCircle.style.display = "none";
+      o.targetBeacon.style.display = "none";
+      return;
+    }
+
+    const projected = worldPos.clone().project(this.camera);
+    const tx = (projected.x * 0.5 + 0.5) * this.width;
+    const ty = (-projected.y * 0.5 + 0.5) * this.height;
+
+    let sx = tx - 120;
+    let sy = ty - 80;
+    let isLeft = true;
+
+    if (this.focusedCard && this.focusedCard.offsetParent !== null) {
+      const cardRect = this.focusedCard.getBoundingClientRect();
+      const containerRect = this.container.getBoundingClientRect();
+      isLeft = cardRect.left + cardRect.width / 2 < this.width / 2;
+      sx = (isLeft ? cardRect.right + 2 : cardRect.left - 2) - containerRect.left;
+      sy = cardRect.top + cardRect.height / 2 - containerRect.top;
+    } else {
+      const mobileCallout = document.querySelector(".mobile-callout-card");
+      if (mobileCallout && mobileCallout.style.display !== "none") {
+        const mRect = mobileCallout.getBoundingClientRect();
+        const containerRect = this.container.getBoundingClientRect();
+        sx = mRect.left + mRect.width / 2 - containerRect.left;
+        sy = mRect.bottom + 2 - containerRect.top;
+        isLeft = sx < tx;
+      } else {
+        isLeft = tx > this.width / 2;
+        sx = isLeft ? Math.max(25, tx - 140) : Math.min(this.width - 25, tx + 140);
+        sy = Math.max(80, Math.min(this.height - 120, ty - 60));
+      }
+    }
+
+    const elbowX = isLeft ? Math.max(sx + 35, (sx + tx) * 0.5) : Math.min(sx - 35, (sx + tx) * 0.5);
+    const pathD = `M ${sx.toFixed(1)} ${sy.toFixed(1)} L ${elbowX.toFixed(1)} ${sy.toFixed(1)} L ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+
+    const partColor = this.focusedPart.colorHex || "#00d2ff";
+    o.leaderPath.setAttribute("d", pathD);
+    o.leaderPath.setAttribute("stroke", partColor);
+    o.leaderPath.style.display = "block";
+
+    o.startCircle.setAttribute("cx", sx.toFixed(1));
+    o.startCircle.setAttribute("cy", sy.toFixed(1));
+    o.startCircle.setAttribute("fill", partColor);
+    o.startCircle.style.display = "block";
+
+    o.endCircle.setAttribute("cx", tx.toFixed(1));
+    o.endCircle.setAttribute("cy", ty.toFixed(1));
+    o.endCircle.style.display = "block";
+
+    o.targetBeacon.style.display = "block";
+    o.targetBeacon.style.transform = `translate(${tx.toFixed(1)}px, ${ty.toFixed(1)}px) translate(-50%, -50%)`;
+    o.targetBeacon.style.setProperty("--part-color", partColor);
+
+    const titleEl = o.targetBeacon.querySelector(".beacon-part-title");
+    const catEl = o.targetBeacon.querySelector(".beacon-part-category");
+    if (titleEl) titleEl.textContent = this.focusedPart.partName || "Component";
+    if (catEl) catEl.textContent = this.focusedPart.category || "Part";
   }
 
   onWindowResize = () => {
@@ -881,6 +1134,7 @@ export class SceneManager {
       this.currentModelRoot.rotation.y += 0.22 * dt;
     }
 
+    this._updateFocusedPartLeaderLine();
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
